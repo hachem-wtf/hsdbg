@@ -1,2 +1,2 @@
 # hsdbg
-hachem's stupid debuggert.
+hachem's stupid debugger.
