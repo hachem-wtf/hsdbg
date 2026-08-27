@@ -35,15 +35,18 @@ namespace Hsdbg::Log
             Level::Trace;
 #endif
 
+        constexpr std::string_view RESET = "\x1b[0m";
+        constexpr std::string_view DIM = "\x1b[90m";
+
         inline auto label(Level level) -> std::string_view
         {
             switch (level)
             {
-                case Level::Trace: return "trace";
-                case Level::Debug: return "debug";
-                case Level::Info:  return "info ";
-                case Level::Warn:  return "warn ";
-                case Level::Error: return "error";
+                case Level::Trace: return "TRACE";
+                case Level::Debug: return "DEBUG";
+                case Level::Info:  return "INFO ";
+                case Level::Warn:  return "WARN ";
+                case Level::Error: return "ERROR";
             }
 
             return "?????";
@@ -53,11 +56,11 @@ namespace Hsdbg::Log
         {
             switch (level)
             {
-                case Level::Trace: return "\x1b[90m";
-                case Level::Debug: return "\x1b[36m";
-                case Level::Info:  return "\x1b[32m";
-                case Level::Warn:  return "\x1b[33m";
-                case Level::Error: return "\x1b[31m";
+                case Level::Trace: return "\x1b[1;90m";
+                case Level::Debug: return "\x1b[1;35m";
+                case Level::Info:  return "\x1b[1;36m";
+                case Level::Warn:  return "\x1b[1;33m";
+                case Level::Error: return "\x1b[1;31m";
             }
 
             return "";
@@ -86,9 +89,17 @@ namespace Hsdbg::Log
             std::ostream& stream = to_stderr ? std::cerr : std::cout;
 
             if (is_terminal(to_stderr))
-                std::println(stream, "{}{}\x1b[0m {}", color(level), label(level), message);
+            {
+                std::println(stream,
+                             "{}{}{} {}│{} {}",
+                             color(level), label(level), RESET,
+                             DIM, RESET,
+                             message);
+            }
             else
-                std::println(stream, "{} {}", label(level), message);
+            {
+                std::println(stream, "{} | {}", label(level), message);
+            }
 
             // never let a crash swallow the last lines that explain it
             stream.flush();

@@ -2,6 +2,10 @@
 
 #include "core/assert.h"
 #include "core/log.h"
+#include "core/window.h"
+#include "core/window_manager.h"
+
+#include <glad/gl.h>
 
 #include <chrono>
 
@@ -13,9 +17,9 @@ namespace Hsdbg
 
         constexpr float MAX_DELTA_TIME = 0.25f;
 
-        // the run loop has nothing to block on until the window owns it, so it is
-        // time boxed for now to keep the app from spinning forever
-        constexpr float PLACEHOLDER_RUN_TIME = 1.0f;
+        // a minimized window has no framebuffer to draw into, so idle instead of
+        // burning a core on frames nobody can see
+        constexpr double MINIMIZED_WAIT_TIMEOUT = 0.1;
     }
 
     Application* Application::s_instance = nullptr;
@@ -27,10 +31,23 @@ namespace Hsdbg
         s_instance = this;
 
         Log::info("{}: starting up", m_spec.name);
+
+        m_window_manager = std::make_unique<WindowManager>();
+
+        WindowSpec window_spec;
+        window_spec.title = m_spec.name;
+        window_spec.width = m_spec.width;
+        window_spec.height = m_spec.height;
+        window_spec.vsync = m_spec.vsync;
+
+        m_window = &m_window_manager->create_window(window_spec);
     }
 
     Application::~Application()
     {
+        m_window = nullptr;
+        m_window_manager.reset();
+
         Log::info("{}: shutting down after {} frames", m_spec.name, m_frame_count);
 
         s_instance = nullptr;
@@ -58,7 +75,24 @@ namespace Hsdbg
             m_time += m_delta_time;
             m_frame_count += 1;
 
+            m_window_manager->poll_events();
+
+            if (m_window->should_close())
+            {
+                close();
+                break;
+            }
+
+            if (m_window->is_minimized())
+            {
+                m_window_manager->wait_events(MINIMIZED_WAIT_TIMEOUT);
+                continue;
+            }
+
             update();
+            render();
+
+            m_window->swap_buffers();
         }
     }
 
@@ -69,7 +103,16 @@ namespace Hsdbg
 
     auto Application::update() -> void
     {
-        if (m_time >= PLACEHOLDER_RUN_TIME)
-            close();
+    }
+
+    auto Application::render() -> void
+    {
+        glViewport(0,
+                   0,
+                   static_cast<GLsizei>(m_window->framebuffer_width()),
+                   static_cast<GLsizei>(m_window->framebuffer_height()));
+
+        glClearColor(0.09f, 0.09f, 0.11f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     }
 }
