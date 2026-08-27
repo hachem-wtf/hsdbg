@@ -5,6 +5,7 @@
 #include "core/window.h"
 #include "core/window_manager.h"
 #include "debugger/debugger.h"
+#include "ui/ui.h"
 
 #include <glad/gl.h>
 
@@ -41,10 +42,12 @@ namespace Hsdbg
         m_window = &m_window_manager->create_window(window_spec);
 
         m_debugger = std::make_unique<Debugger>();
+        m_ui = std::make_unique<Ui>(*m_window);
     }
 
     Application::~Application()
     {
+        m_ui.reset();
         m_debugger.reset();
 
         m_window = nullptr;
@@ -110,10 +113,15 @@ namespace Hsdbg
 
     auto Application::render() -> void
     {
+        m_ui->begin_frame();
+        m_ui->draw(*m_debugger);
+
         glViewport(0, 0,
                    static_cast<GLsizei>(m_window->framebuffer_width()),
                    static_cast<GLsizei>(m_window->framebuffer_height()));
-        glClearColor(0.09f, 0.09f, 0.11f, 1.0f);
+        glClearColor(0.05f, 0.05f, 0.06f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        m_ui->end_frame();
     }
 }

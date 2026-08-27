@@ -7,6 +7,7 @@
 namespace Hsdbg
 {
     class Debugger;
+    class Ui;
     class Window;
     class WindowManager;
 
@@ -51,6 +52,7 @@ namespace Hsdbg
         ApplicationSpec m_spec;
         std::unique_ptr<WindowManager> m_window_manager;
         std::unique_ptr<Debugger> m_debugger;
+        std::unique_ptr<Ui> m_ui;
         Window* m_window = nullptr;
         bool m_running = false;
         float m_delta_time = 0.0f;

@@ -218,6 +218,9 @@ project "imgui"
         "ext/imgui/imstb_textedit.h",
         "ext/imgui/imstb_truetype.h",
 
+        "ext/imgui/misc/cpp/imgui_stdlib.h",
+        "ext/imgui/misc/cpp/imgui_stdlib.cpp",
+
         "ext/imgui/backends/imgui_impl_glfw.h",
         "ext/imgui/backends/imgui_impl_glfw.cpp",
         "ext/imgui/backends/imgui_impl_opengl3.h",
