@@ -4,6 +4,7 @@
 #include "core/log.h"
 #include "core/window.h"
 #include "core/window_manager.h"
+#include "debugger/debugger.h"
 
 #include <glad/gl.h>
 
@@ -16,9 +17,6 @@ namespace Hsdbg
         using Clock = std::chrono::steady_clock;
 
         constexpr float MAX_DELTA_TIME = 0.25f;
-
-        // a minimized window has no framebuffer to draw into, so idle instead of
-        // burning a core on frames nobody can see
         constexpr double MINIMIZED_WAIT_TIMEOUT = 0.1;
     }
 
@@ -41,10 +39,14 @@ namespace Hsdbg
         window_spec.vsync = m_spec.vsync;
 
         m_window = &m_window_manager->create_window(window_spec);
+
+        m_debugger = std::make_unique<Debugger>();
     }
 
     Application::~Application()
     {
+        m_debugger.reset();
+
         m_window = nullptr;
         m_window_manager.reset();
 
@@ -103,15 +105,14 @@ namespace Hsdbg
 
     auto Application::update() -> void
     {
+        m_debugger->update();
     }
 
     auto Application::render() -> void
     {
-        glViewport(0,
-                   0,
+        glViewport(0, 0,
                    static_cast<GLsizei>(m_window->framebuffer_width()),
                    static_cast<GLsizei>(m_window->framebuffer_height()));
-
         glClearColor(0.09f, 0.09f, 0.11f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     }

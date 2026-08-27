@@ -6,6 +6,7 @@
 
 namespace Hsdbg
 {
+    class Debugger;
     class Window;
     class WindowManager;
 
@@ -34,6 +35,7 @@ namespace Hsdbg
         auto close() -> void;
 
         auto window() -> Window& { return *m_window; }
+        auto debugger() -> Debugger& { return *m_debugger; }
         auto spec() const -> const ApplicationSpec& { return m_spec; }
         auto is_running() const -> bool { return m_running; }
         auto delta_time() const -> float { return m_delta_time; }
@@ -48,6 +50,7 @@ namespace Hsdbg
 
         ApplicationSpec m_spec;
         std::unique_ptr<WindowManager> m_window_manager;
+        std::unique_ptr<Debugger> m_debugger;
         Window* m_window = nullptr;
         bool m_running = false;
         float m_delta_time = 0.0f;
