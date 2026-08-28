@@ -40,6 +40,7 @@ namespace Hsdbg
             bool breakpoints = true;
             bool call_stack = true;
             bool threads = true;
+            bool source_tree = true;
             bool locals = true;
             bool registers = true;
             bool symbols = true;
@@ -60,6 +61,7 @@ namespace Hsdbg
         auto draw_breakpoints_panel(Debugger& debugger) -> void;
         auto draw_call_stack_panel(Debugger& debugger) -> void;
         auto draw_threads_panel(Debugger& debugger) -> void;
+        auto draw_source_tree_panel(Debugger& debugger) -> void;
         auto draw_locals_panel(Debugger& debugger) -> void;
         auto draw_registers_panel(Debugger& debugger) -> void;
         auto draw_symbols_panel(Debugger& debugger) -> void;
@@ -81,11 +83,13 @@ namespace Hsdbg
         std::string m_console_input;
         std::string m_target_input;
         std::string m_symbol_filter;
+        std::string m_source_filter;
 
         uint64_t m_followed_stop = 0;
         std::filesystem::path m_followed_target;
 
         bool m_layout_built = false;
+        bool m_select_default_tabs = false;
         bool m_console_scroll_pending = false;
         bool m_load_target_pending = false;
         bool m_focus_breakpoints = false;

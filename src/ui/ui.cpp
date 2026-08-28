@@ -26,6 +26,7 @@ namespace Hsdbg
         constexpr const char* PANEL_BREAKPOINTS = "breakpoints";
         constexpr const char* PANEL_CALL_STACK = "call stack";
         constexpr const char* PANEL_THREADS = "threads";
+        constexpr const char* PANEL_SOURCE_TREE = "source tree";
         constexpr const char* PANEL_LOCALS = "locals";
         constexpr const char* PANEL_REGISTERS = "registers";
         constexpr const char* PANEL_SYMBOLS = "symbols";
@@ -98,6 +99,144 @@ namespace Hsdbg
             };
 
             return std::ranges::search(name, filter, equal).begin() != name.end();
+        }
+
+        struct SourceNode
+        {
+            std::string name;
+            std::filesystem::path path;
+            std::vector<SourceNode> children;
+        };
+
+        auto find_or_add_child(std::vector<SourceNode>& nodes, std::string_view name) -> SourceNode&
+        {
+            for (SourceNode& node : nodes)
+            {
+                if (node.name == name)
+                    return node;
+            }
+
+            nodes.push_back({ std::string(name), {}, {} });
+            return nodes.back();
+        }
+
+        auto common_directory(std::span<const std::filesystem::path> files) -> std::filesystem::path
+        {
+            if (files.empty())
+                return {};
+
+            std::filesystem::path prefix = files.front().parent_path();
+
+            for (const std::filesystem::path& file : files)
+            {
+                while (true)
+                {
+                    if (file.parent_path() == prefix)
+                        break;
+
+                    std::error_code error;
+                    const std::filesystem::path relative =
+                        std::filesystem::relative(file.parent_path(), prefix, error);
+                    const std::string text = relative.generic_string();
+
+                    if (!error && (text.empty() || text == "." || !text.starts_with("..")))
+                        break;
+
+                    const std::filesystem::path parent = prefix.parent_path();
+
+                    if (parent == prefix)
+                        break;
+
+                    prefix = parent;
+                }
+            }
+
+            return prefix;
+        }
+
+        auto build_source_tree(std::span<const std::filesystem::path> files) -> SourceNode
+        {
+            SourceNode root;
+            const std::filesystem::path prefix = common_directory(files);
+            root.name = prefix.empty() ? "/" : prefix.filename().string();
+
+            if (root.name.empty())
+                root.name = prefix.string();
+
+            for (const std::filesystem::path& file : files)
+            {
+                std::error_code error;
+                std::filesystem::path relative = std::filesystem::relative(file, prefix, error);
+
+                if (error || relative.empty())
+                    relative = file.filename();
+
+                SourceNode* current = &root;
+
+                const std::vector<std::filesystem::path> parts(relative.begin(), relative.end());
+
+                for (size_t index = 0; index < parts.size(); ++index)
+                {
+                    SourceNode& child = find_or_add_child(current->children, parts[index].string());
+
+                    if (index + 1 == parts.size())
+                        child.path = file;
+                    else
+                        current = &child;
+                }
+            }
+
+            const auto sort_nodes = [](this const auto& self, std::vector<SourceNode>& nodes) -> void
+            {
+                std::ranges::sort(nodes, [](const SourceNode& left, const SourceNode& right)
+                {
+                    const bool left_directory = left.path.empty();
+                    const bool right_directory = right.path.empty();
+
+                    if (left_directory != right_directory)
+                        return left_directory;
+
+                    return left.name < right.name;
+                });
+
+                for (SourceNode& node : nodes)
+                    self(node.children);
+            };
+
+            sort_nodes(root.children);
+
+            return root;
+        }
+
+        auto source_node_matches(const SourceNode& node, std::string_view filter) -> bool
+        {
+            if (filter.empty())
+                return true;
+
+            if (!node.path.empty())
+                return matches_filter(node.name, filter);
+
+            return std::ranges::any_of(node.children, [&](const SourceNode& child)
+            {
+                return source_node_matches(child, filter);
+            });
+        }
+
+        auto preferred_source(std::span<const std::filesystem::path> files) -> std::filesystem::path
+        {
+            for (const std::filesystem::path& file : files)
+            {
+                if (file.stem() == "main" && std::filesystem::exists(file))
+                    return file;
+            }
+
+            for (const std::filesystem::path& file : files)
+            {
+                if (std::filesystem::exists(file))
+                    return file;
+            }
+
+            return {};
         }
 
         auto draw_instruction_table(Debugger& debugger,
@@ -353,9 +492,17 @@ namespace Hsdbg
             return;
 
         m_followed_target = debugger.target_path();
-        m_focus_symbols = true;
         m_scroll_to_symbol = true;
         m_scroll_to_program_counter = true;
+
+        if (m_source_view.path().empty())
+        {
+            if (const std::filesystem::path source = preferred_source(debugger.source_files());
+                !source.empty())
+            {
+                open_source(source);
+            }
+        }
     }
 
     auto Ui::show_frame(const StackFrame& frame) -> void
@@ -408,9 +555,7 @@ namespace Hsdbg
         {
             build_default_layout(dockspace_id);
             m_layout_built = true;
-
-            // otherwise whichever panel happens to be submitted last wins the tab
-            m_focus_breakpoints = true;
+            m_select_default_tabs = true;
         }
 
         draw_status_bar(debugger);
@@ -421,6 +566,7 @@ namespace Hsdbg
         draw_source_panel(debugger);
         draw_breakpoints_panel(debugger);
         draw_call_stack_panel(debugger);
+        draw_source_tree_panel(debugger);
         draw_threads_panel(debugger);
         draw_locals_panel(debugger);
         draw_registers_panel(debugger);
@@ -433,19 +579,27 @@ namespace Hsdbg
 
         // a window claims its tab when it is first submitted, so this can only be
         // asked for once every panel in the node exists
+        if (m_select_default_tabs)
+        {
+            ImGui::SetWindowFocus(PANEL_LOCALS);
+            ImGui::SetWindowFocus(PANEL_BREAKPOINTS);
+            ImGui::SetWindowFocus(PANEL_SOURCE);
+            ImGui::SetWindowFocus(PANEL_SOURCE_TREE);
+            m_select_default_tabs = false;
+        }
+
         if (m_focus_symbols)
         {
             ImGui::SetWindowFocus(PANEL_SYMBOLS);
             m_focus_symbols = false;
-            m_focus_breakpoints = false;
         }
         else if (m_focus_disassembly)
         {
             ImGui::SetWindowFocus(PANEL_DISASSEMBLY);
             m_focus_disassembly = false;
-            m_focus_breakpoints = false;
         }
-        else if (m_focus_breakpoints)
+
+        if (m_focus_breakpoints)
         {
             ImGui::SetWindowFocus(PANEL_BREAKPOINTS);
             m_focus_breakpoints = false;
@@ -460,8 +614,8 @@ namespace Hsdbg
 
         ImGuiID center_id = dockspace_id;
         const ImGuiID left_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Left, 0.20f, nullptr, &center_id);
-        const ImGuiID right_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Right, 0.28f, nullptr, &center_id);
-        const ImGuiID bottom_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Down, 0.28f, nullptr, &center_id);
+        const ImGuiID right_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Right, 0.22f, nullptr, &center_id);
+        const ImGuiID bottom_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Down, 0.24f, nullptr, &center_id);
 
         ImGuiID left_top_id = left_id;
         const ImGuiID left_bottom_id = ImGui::DockBuilderSplitNode(left_top_id, ImGuiDir_Down, 0.5f, nullptr, &left_top_id);
@@ -471,10 +625,11 @@ namespace Hsdbg
 
         ImGui::DockBuilderDockWindow(PANEL_SOURCE, center_id);
         ImGui::DockBuilderDockWindow(PANEL_DISASSEMBLY, center_id);
+        ImGui::DockBuilderDockWindow(PANEL_SOURCE_TREE, left_top_id);
         ImGui::DockBuilderDockWindow(PANEL_THREADS, left_top_id);
         ImGui::DockBuilderDockWindow(PANEL_SYMBOLS, left_bottom_id);
-        ImGui::DockBuilderDockWindow(PANEL_CALL_STACK, left_bottom_id);
         ImGui::DockBuilderDockWindow(PANEL_LOCALS, right_top_id);
+        ImGui::DockBuilderDockWindow(PANEL_CALL_STACK, right_top_id);
         ImGui::DockBuilderDockWindow(PANEL_REGISTERS, right_bottom_id);
         ImGui::DockBuilderDockWindow(PANEL_BREAKPOINTS, bottom_id);
         ImGui::DockBuilderDockWindow(PANEL_CONSOLE, bottom_id);
@@ -543,6 +698,7 @@ namespace Hsdbg
         if (ImGui::BeginMenu("view"))
         {
             ImGui::MenuItem(PANEL_SOURCE, nullptr, &m_visible.source);
+            ImGui::MenuItem(PANEL_SOURCE_TREE, nullptr, &m_visible.source_tree);
             ImGui::MenuItem(PANEL_BREAKPOINTS, nullptr, &m_visible.breakpoints);
             ImGui::MenuItem(PANEL_CALL_STACK, nullptr, &m_visible.call_stack);
             ImGui::MenuItem(PANEL_THREADS, nullptr, &m_visible.threads);
@@ -904,6 +1060,73 @@ namespace Hsdbg
                     ImGui::SameLine();
                     ImGui::TextDisabled("%s", to_string(thread.stop_reason).data());
                 }
+            }
+        }
+
+        ImGui::End();
+    }
+
+    auto Ui::draw_source_tree_panel(Debugger& debugger) -> void
+    {
+        if (!m_visible.source_tree)
+            return;
+
+        if (ImGui::Begin(PANEL_SOURCE_TREE, &m_visible.source_tree))
+        {
+            const std::span<const std::filesystem::path> files = debugger.source_files();
+
+            if (files.empty())
+            {
+                ImGui::TextDisabled("no source files");
+            }
+            else
+            {
+                ImGui::SetNextItemWidth(-1.0f);
+                ImGui::InputTextWithHint("##source_filter", "filter files", &m_source_filter);
+
+                const SourceNode tree = build_source_tree(files);
+                const std::filesystem::path& open = m_source_view.path();
+
+                const auto draw_node = [&](this const auto& self, const SourceNode& node) -> void
+                {
+                    if (!source_node_matches(node, m_source_filter))
+                        return;
+
+                    if (!node.path.empty())
+                    {
+                        const bool selected = node.path == open;
+
+                        if (ImGui::Selectable(node.name.c_str(), selected))
+                        {
+                            open_source(node.path);
+                            ImGui::SetWindowFocus(PANEL_SOURCE);
+                        }
+
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", node.path.string().c_str());
+
+                        return;
+                    }
+
+                    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth |
+                                               ImGuiTreeNodeFlags_OpenOnArrow;
+
+                    if (m_source_filter.empty())
+                        flags |= ImGuiTreeNodeFlags_DefaultOpen;
+
+                    if (!ImGui::TreeNodeEx(node.name.c_str(), flags))
+                        return;
+
+                    for (const SourceNode& child : node.children)
+                        self(child);
+
+                    ImGui::TreePop();
+                };
+
+                if (tree.children.empty())
+                    ImGui::TextDisabled("no source files");
+                else
+                    draw_node(tree);
             }
         }
 

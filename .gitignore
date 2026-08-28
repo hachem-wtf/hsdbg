@@ -23,3 +23,5 @@ imgui.ini
 ext/llvm/
 ext/llvm-staging/
 ext/*.tar.xz
+
+test/

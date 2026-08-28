@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <set>
 #include <source_location>
 
 // no standard way to read or write the environment
@@ -314,6 +315,78 @@ namespace Hsdbg
             return symbols;
         }
 
+        auto is_system_source(const std::filesystem::path& path) -> bool
+        {
+            const std::string text = path.generic_string();
+
+            constexpr std::string_view markers[] = {
+                "/usr/",
+                "/opt/",
+                "/Library/",
+                "/Applications/",
+                "/System/",
+                "/c++/v1/",
+                "\\Program Files",
+                "\\Windows Kits",
+            };
+
+            return std::ranges::any_of(markers, [&](std::string_view marker)
+            {
+                return text.find(marker) != std::string::npos;
+            });
+        }
+
+        auto normalize_source(const std::filesystem::path& path) -> std::filesystem::path
+        {
+            std::error_code error;
+            std::filesystem::path canonical = std::filesystem::weakly_canonical(path, error);
+
+            return error ? path.lexically_normal() : canonical;
+        }
+
+        auto module_source_files(lldb::SBTarget& target) -> std::vector<std::filesystem::path>
+        {
+            std::set<std::filesystem::path> files;
+
+            lldb::SBModule module = target.FindModule(target.GetExecutable());
+
+            if (!module.IsValid())
+                return {};
+
+            for (uint32_t index = 0; index < module.GetNumCompileUnits(); ++index)
+            {
+                lldb::SBCompileUnit unit = module.GetCompileUnitAtIndex(index);
+
+                if (!unit.IsValid())
+                    continue;
+
+                if (std::filesystem::path cu = path_of(unit.GetFileSpec()); !cu.empty())
+                {
+                    cu = normalize_source(cu);
+
+                    if (std::filesystem::is_regular_file(cu))
+                        files.insert(cu);
+                }
+
+                for (uint32_t support = 0; support < unit.GetNumSupportFiles(); ++support)
+                {
+                    std::filesystem::path path = path_of(unit.GetSupportFileAtIndex(support));
+
+                    if (path.empty() || is_system_source(path))
+                        continue;
+
+                    path = normalize_source(path);
+
+                    if (!std::filesystem::is_regular_file(path))
+                        continue;
+
+                    files.insert(std::move(path));
+                }
+            }
+
+            return { files.begin(), files.end() };
+        }
+
         auto display_of(lldb::SBValue& value) -> std::string
         {
             const char* text = value.GetValue();
@@ -458,6 +531,7 @@ namespace Hsdbg
         m_disassembly.clear();
         m_disassembly_name.clear();
         m_selected_symbol = 0;
+        refresh_source_files();
         refresh_disassembly();
 
         return {};
@@ -480,6 +554,7 @@ namespace Hsdbg
         m_locals.clear();
         m_registers.clear();
         m_symbols.clear();
+        m_source_files.clear();
         m_disassembly.clear();
         m_disassembly_name.clear();
         m_console_output.clear();
@@ -641,6 +716,9 @@ namespace Hsdbg
         }
 
         Log::info("debugger: attached to pid {}", m_process_id);
+
+        if (m_source_files.empty())
+            refresh_source_files();
 
         sync_after_start();
 
@@ -1392,6 +1470,16 @@ namespace Hsdbg
         m_symbols = module_symbols(m_session->target);
     }
 
+    auto Debugger::refresh_source_files() -> void
+    {
+        m_source_files.clear();
+
+        if (!m_session->target.IsValid())
+            return;
+
+        m_source_files = module_source_files(m_session->target);
+    }
+
     auto Debugger::load_disassembly(uint64_t file_address) -> void
     {
         m_disassembly.clear();
@@ -1446,6 +1534,7 @@ namespace Hsdbg
         if (!m_session->target.IsValid())
         {
             m_symbols.clear();
+            m_source_files.clear();
             m_disassembly.clear();
             m_disassembly_name.clear();
             m_selected_symbol = 0;
@@ -1454,6 +1543,9 @@ namespace Hsdbg
 
         if (m_symbols.empty())
             refresh_symbols();
+
+        if (m_source_files.empty())
+            refresh_source_files();
 
         for (Symbol& symbol : m_symbols)
         {

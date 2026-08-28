@@ -58,6 +58,7 @@ namespace Hsdbg
         auto locals() const -> std::span<const Variable> { return m_locals; }
         auto registers() const -> std::span<const Register> { return m_registers; }
         auto symbols() const -> std::span<const Symbol> { return m_symbols; }
+        auto source_files() const -> std::span<const std::filesystem::path> { return m_source_files; }
         auto disassembly() const -> std::span<const Instruction> { return m_disassembly; }
         auto disassembly_name() const -> std::string_view { return m_disassembly_name; }
         auto evaluate(std::string_view expression) -> Result<std::string>;
@@ -106,6 +107,7 @@ namespace Hsdbg
         auto refresh_call_stack() -> void;
         auto refresh_frame_data() -> void;
         auto refresh_symbols() -> void;
+        auto refresh_source_files() -> void;
         auto refresh_disassembly() -> void;
         auto load_disassembly(uint64_t file_address) -> void;
 
@@ -125,6 +127,7 @@ namespace Hsdbg
         std::vector<Variable> m_locals;
         std::vector<Register> m_registers;
         std::vector<Symbol> m_symbols;
+        std::vector<std::filesystem::path> m_source_files;
         std::vector<Instruction> m_disassembly;
         std::string m_disassembly_name;
         std::vector<std::string> m_console_output;
