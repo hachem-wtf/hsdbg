@@ -86,6 +86,9 @@ namespace Hsdbg
         std::string function;
         uint64_t address = 0;
         std::string condition;
+
+        // how many hits lldb lets through before it starts stopping
+        uint32_t ignore_count = 0;
         uint32_t hit_count = 0;
         bool enabled = true;
         bool resolved = false;

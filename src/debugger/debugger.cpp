@@ -45,7 +45,11 @@ namespace Hsdbg
                 llvm_prefix / "bin" / "debugserver",
             };
 #elif defined(HSDBG_LINUX)
-            return { llvm_prefix / "bin" / "lldb-server" };
+            return {
+                llvm_prefix / "bin" / "lldb-server",
+                "/usr/bin/lldb-server",
+                "/usr/local/bin/lldb-server",
+            };
 #else
             return {};
 #endif
@@ -74,7 +78,12 @@ namespace Hsdbg
                 return;
             }
 
-            Log::warn("debugger: no debug server found, launching a target will fail");
+            Log::warn("debugger: no debug server found, leaving lldb to locate one");
+        }
+
+        auto text_or(const char* text, std::string_view fallback) -> std::string
+        {
+            return text != nullptr && text[0] != '\0' ? std::string(text) : std::string(fallback);
         }
 
         auto path_of(lldb::SBFileSpec spec) -> std::filesystem::path
@@ -180,11 +189,6 @@ namespace Hsdbg
         // the inferior, so stop well before anything recursive gets interesting
         constexpr uint32_t MAX_VARIABLE_DEPTH = 3;
         constexpr uint32_t MAX_VARIABLE_CHILDREN = 64;
-
-        auto text_or(const char* text, std::string_view fallback) -> std::string
-        {
-            return text != nullptr && text[0] != '\0' ? std::string(text) : std::string(fallback);
-        }
 
         auto frame_of(lldb::SBProcess& process, uint64_t thread_id, uint32_t frame_index) -> lldb::SBFrame
         {
@@ -424,6 +428,19 @@ namespace Hsdbg
 
         if (spec.stop_at_entry)
             info.SetLaunchFlags(info.GetLaunchFlags() | lldb::eLaunchFlagStopAtEntry);
+
+        // lldb counts an ignore count down as hits are consumed, so a rerun has
+        // to start it over or it would only ever skip once
+        for (const Breakpoint& breakpoint : m_breakpoints)
+        {
+            if (breakpoint.backend_id == 0)
+                continue;
+
+            lldb::SBBreakpoint source = m_session->target.FindBreakpointByID(breakpoint.backend_id);
+
+            if (source.IsValid())
+                source.SetIgnoreCount(breakpoint.ignore_count);
+        }
 
         set_state(TargetState::Launching);
 
@@ -741,6 +758,51 @@ namespace Hsdbg
             if (source.IsValid())
                 source.SetEnabled(enabled);
         }
+
+        return true;
+    }
+
+    auto Debugger::set_breakpoint_condition(uint32_t id, std::string_view condition) -> bool
+    {
+        Breakpoint* breakpoint = find_breakpoint(id);
+        if (breakpoint == nullptr)
+            return false;
+
+        breakpoint->condition = condition;
+
+        if (breakpoint->backend_id != 0 && m_session->target.IsValid())
+        {
+            lldb::SBBreakpoint source = m_session->target.FindBreakpointByID(breakpoint->backend_id);
+
+            if (source.IsValid())
+                source.SetCondition(breakpoint->condition.c_str());
+        }
+
+        if (breakpoint->condition.empty())
+            Log::info("debugger: breakpoint {} is unconditional", id);
+        else
+            Log::info("debugger: breakpoint {} stops when '{}'", id, breakpoint->condition);
+
+        return true;
+    }
+
+    auto Debugger::set_breakpoint_ignore_count(uint32_t id, uint32_t count) -> bool
+    {
+        Breakpoint* breakpoint = find_breakpoint(id);
+        if (breakpoint == nullptr)
+            return false;
+
+        breakpoint->ignore_count = count;
+
+        if (breakpoint->backend_id != 0 && m_session->target.IsValid())
+        {
+            lldb::SBBreakpoint source = m_session->target.FindBreakpointByID(breakpoint->backend_id);
+
+            if (source.IsValid())
+                source.SetIgnoreCount(count);
+        }
+
+        Log::info("debugger: breakpoint {} ignores {} hits", id, count);
 
         return true;
     }
@@ -1189,6 +1251,13 @@ namespace Hsdbg
         }
 
         created.SetEnabled(breakpoint.enabled);
+
+        // a breakpoint can be conditioned before any target exists to carry it
+        if (!breakpoint.condition.empty())
+            created.SetCondition(breakpoint.condition.c_str());
+
+        if (breakpoint.ignore_count != 0)
+            created.SetIgnoreCount(breakpoint.ignore_count);
 
         breakpoint.backend_id = created.GetID();
 

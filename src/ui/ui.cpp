@@ -523,12 +523,14 @@ namespace Hsdbg
                                                   ImGuiTableFlags_SizingStretchProp |
                                                   ImGuiTableFlags_ScrollY;
 
-                if (ImGui::BeginTable("##breakpoints", 6, flags))
+                if (ImGui::BeginTable("##breakpoints", 8, flags))
                 {
                     ImGui::TableSetupColumn("on", ImGuiTableColumnFlags_WidthFixed, 26.0f);
                     ImGui::TableSetupColumn("id", ImGuiTableColumnFlags_WidthFixed, 30.0f);
                     ImGui::TableSetupColumn("location");
                     ImGui::TableSetupColumn("address");
+                    ImGui::TableSetupColumn("condition");
+                    ImGui::TableSetupColumn("skip", ImGuiTableColumnFlags_WidthFixed, 50.0f);
                     ImGui::TableSetupColumn("hits", ImGuiTableColumnFlags_WidthFixed, 40.0f);
                     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 26.0f);
                     ImGui::TableSetupScrollFreeze(0, 1);
@@ -575,6 +577,31 @@ namespace Hsdbg
                         else
                         {
                             ImGui::TextDisabled("pending");
+                        }
+
+                        // imgui keeps its own buffer while an input is focused, so
+                        // these copies only seed it and receive the final text
+                        ImGui::TableNextColumn();
+                        std::string condition = breakpoint.condition;
+                        ImGui::SetNextItemWidth(-1.0f);
+
+                        if (ImGui::InputTextWithHint("##condition",
+                                                     "stop when",
+                                                     &condition,
+                                                     ImGuiInputTextFlags_EnterReturnsTrue))
+                        {
+                            debugger.set_breakpoint_condition(breakpoint.id, condition);
+                        }
+
+                        ImGui::TableNextColumn();
+                        int ignore_count = static_cast<int>(breakpoint.ignore_count);
+                        ImGui::SetNextItemWidth(-1.0f);
+
+                        if (ImGui::InputInt("##skip", &ignore_count, 0, 0,
+                                            ImGuiInputTextFlags_EnterReturnsTrue))
+                        {
+                            debugger.set_breakpoint_ignore_count(breakpoint.id,
+                                                                 static_cast<uint32_t>(std::max(ignore_count, 0)));
                         }
 
                         ImGui::TableNextColumn();

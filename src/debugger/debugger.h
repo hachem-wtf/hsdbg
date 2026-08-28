@@ -45,6 +45,8 @@ namespace Hsdbg
         auto add_function_breakpoint(std::string_view function) -> uint32_t;
         auto remove_breakpoint(uint32_t id) -> bool;
         auto set_breakpoint_enabled(uint32_t id, bool enabled) -> bool;
+        auto set_breakpoint_condition(uint32_t id, std::string_view condition) -> bool;
+        auto set_breakpoint_ignore_count(uint32_t id, uint32_t count) -> bool;
         auto clear_breakpoints() -> void;
         auto find_breakpoint(uint32_t id) -> Breakpoint*;
         auto breakpoints() const -> std::span<const Breakpoint> { return m_breakpoints; }
