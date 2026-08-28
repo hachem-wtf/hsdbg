@@ -3,17 +3,19 @@ output_dir = "%{cfg.buildcfg}-%{cfg.system}"
 llvm_version = "22.1.0"
 llvm_vendored_dir = "ext/llvm"
 
+host_arm = os.hostarch() == "ARM64" or os.hostarch() == "arm64"
+host_architecture = host_arm and "ARM64" or "x64"
+
 function llvm_release_asset()
     local host = os.host()
-    local arm = os.hostarch() == "ARM64" or os.hostarch() == "arm64"
 
     if host == "macosx" then
-        return "LLVM-" .. llvm_version .. "-macOS-ARM64.tar.xz"
+        return host_arm and ("LLVM-" .. llvm_version .. "-macOS-ARM64.tar.xz") or nil
     elseif host == "linux" then
-        return "LLVM-" .. llvm_version .. (arm and "-Linux-ARM64" or "-Linux-X64") .. ".tar.xz"
+        return "LLVM-" .. llvm_version .. (host_arm and "-Linux-ARM64" or "-Linux-X64") .. ".tar.xz"
     elseif host == "windows" then
         return "clang+llvm-" .. llvm_version ..
-            (arm and "-aarch64-pc-windows-msvc" or "-x86_64-pc-windows-msvc") .. ".tar.xz"
+            (host_arm and "-aarch64-pc-windows-msvc" or "-x86_64-pc-windows-msvc") .. ".tar.xz"
     end
 
     return nil
@@ -92,7 +94,13 @@ function lldb_library()
         return ""
     end
 
-    local names = { "liblldb.dylib", "liblldb.so", "liblldb.lib" }
+    local names = { "liblldb.so" }
+
+    if os.target() == "windows" then
+        names = { "liblldb.lib" }
+    elseif os.target() == "macosx" then
+        names = { "liblldb.dylib" }
+    end
 
     for _, name in ipairs(names) do
         local candidate = library_dir.lldb .. "/" .. name
@@ -105,14 +113,49 @@ function lldb_library()
     local versioned = os.matchfiles(library_dir.lldb .. "/liblldb.so.*")
     table.sort(versioned)
 
-    return versioned[#versioned]
-        or error("llvm at " .. llvm_dir .. " has lldb headers but no liblldb in " .. library_dir.lldb)
+    if versioned[#versioned] ~= nil then
+        return versioned[#versioned]
+    end
+
+    if os.target() ~= os.host() then
+        return library_dir.lldb .. "/" .. names[1]
+    end
+
+    error("llvm at " .. llvm_dir .. " has lldb headers but no liblldb in " .. library_dir.lldb)
+end
+
+function windows_runtime_copies()
+    local commands = {}
+
+    if llvm_dir == "" then
+        return commands
+    end
+
+    local runtimes = os.matchfiles(llvm_dir .. "/bin/liblldb.dll")
+
+    for _, runtime in ipairs(os.matchfiles(llvm_dir .. "/bin/python*.dll")) do
+        table.insert(runtimes, runtime)
+    end
+
+    if #runtimes == 0 then
+        runtimes = { llvm_dir .. "/bin/liblldb.dll" }
+    end
+
+    for _, runtime in ipairs(runtimes) do
+        table.insert(commands, '{COPYFILE} "' .. runtime .. '" "%{cfg.targetdir}"')
+    end
+
+    return commands
 end
 
 function setup_target()
     targetdir ("bin/" .. output_dir)
     objdir ("bin-int/" .. output_dir .. "/%{prj.name}")
     staticruntime "On"
+
+    filter "system:windows"
+        staticruntime "Off"
+    filter {}
 end
 
 function setup_c_target()
@@ -207,7 +250,8 @@ newaction {
         local extracted = os.execute('tar -xf "' .. archive .. '" -C "' .. staging .. '"')
 
         if extracted ~= true and extracted ~= 0 then
-            error("could not extract " .. archive .. ", unpack it into " .. llvm_vendored_dir .. " by hand")
+            error("could not extract " .. archive .. ", the system tar may lack xz support, " ..
+                "unpack it into " .. llvm_vendored_dir .. " by hand")
         end
 
         local unpacked = os.matchdirs(staging .. "/*")[1]
@@ -231,7 +275,7 @@ newaction {
 
 
 workspace "hsdbg"
-    architecture "x64"
+    architecture(host_architecture)
     startproject "hsdbg"
     multiprocessorcompile "On"
 
@@ -246,7 +290,6 @@ workspace "hsdbg"
     filter "system:linux"
         defines "HSDBG_LINUX"
     filter "system:macosx"
-        architecture "ARM64"
         defines "HSDBG_MACOS"
     filter {}
 
@@ -302,6 +345,8 @@ project "glfw"
             "ext/glfw/src/posix_time.h",
             "ext/glfw/src/posix_thread.c",
             "ext/glfw/src/posix_thread.h",
+            "ext/glfw/src/posix_poll.c",
+            "ext/glfw/src/posix_poll.h",
 
             "ext/glfw/src/glx_context.c",
             "ext/glfw/src/egl_context.c",
@@ -462,15 +507,14 @@ project "hsdbg"
 
         links "opengl32"
 
-        postbuildcommands {
-            '{COPYFILE} "' .. llvm_dir .. '/bin/liblldb.dll" "%{cfg.targetdir}"',
-        }
+        postbuildcommands(windows_runtime_copies())
     filter "system:not windows"
         linkoptions { "-Wl,-rpath," .. library_dir.lldb }
     filter "system:linux"
         links {
             "GL",
             "dl",
+            "m",
             "pthread",
         }
     filter "system:macosx"

@@ -8,13 +8,6 @@
 #include <string_view>
 #include <utility>
 
-// there is no standard way to ask whether a stream is a terminal
-#ifdef HSDBG_WINDOWS
-    #include <io.h>
-#else
-    #include <unistd.h>
-#endif
-
 namespace Hsdbg::Log
 {
     enum class Level : uint8_t
@@ -66,19 +59,9 @@ namespace Hsdbg::Log
             return "";
         }
 
-        inline auto is_terminal(bool to_stderr) -> bool
-        {
-            constexpr int STDOUT_DESCRIPTOR = 1;
-            constexpr int STDERR_DESCRIPTOR = 2;
-
-            const int descriptor = to_stderr ? STDERR_DESCRIPTOR : STDOUT_DESCRIPTOR;
-
-#ifdef HSDBG_WINDOWS
-            return _isatty(descriptor) != 0;
-#else
-            return isatty(descriptor) != 0;
-#endif
-        }
+        // true only when the stream is a terminal that understands ansi escapes,
+        // which needs platform calls, so it lives in log.cpp
+        auto is_terminal(bool to_stderr) -> bool;
 
         inline auto write(Level level, std::string_view message) -> void
         {
