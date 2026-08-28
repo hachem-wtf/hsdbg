@@ -1,14 +1,116 @@
 #include "debugger/debugger.h"
 
+#include "core/assert.h"
 #include "core/log.h"
+
+#include <lldb/API/LLDB.h>
 
 #include <algorithm>
 #include <source_location>
+
+// no standard way to read or write the environment
+#include <cstdlib>
 
 namespace Hsdbg
 {
     namespace
     {
+#ifndef HSDBG_LLVM_PREFIX
+    #define HSDBG_LLVM_PREFIX ""
+#endif
+
+        auto set_environment(const char* name, const std::string& value) -> void
+        {
+#ifdef HSDBG_WINDOWS
+            _putenv_s(name, value.c_str());
+#else
+            setenv(name, value.c_str(), 1);
+#endif
+        }
+
+        // lldb spawns a helper to control the inferior on unix. windows needs none,
+        // linux ships lldb-server beside liblldb, and macos requires one entitled
+        // with com.apple.private.cs.debugger, which only the xcode copy carries
+        auto debug_server_candidates() -> std::vector<std::filesystem::path>
+        {
+            const std::filesystem::path llvm_prefix(HSDBG_LLVM_PREFIX);
+
+#if defined(HSDBG_MACOS)
+            return {
+                "/Applications/Xcode.app/Contents/SharedFrameworks/LLDB.framework/Versions/A/"
+                "Resources/debugserver",
+                "/Library/Developer/CommandLineTools/Library/PrivateFrameworks/LLDB.framework/"
+                "Resources/debugserver",
+                llvm_prefix / "bin" / "debugserver",
+            };
+#elif defined(HSDBG_LINUX)
+            return { llvm_prefix / "bin" / "lldb-server" };
+#else
+            return {};
+#endif
+        }
+
+        auto adopt_debug_server() -> void
+        {
+            const std::vector<std::filesystem::path> candidates = debug_server_candidates();
+
+            if (candidates.empty())
+                return;
+
+            if (std::getenv("LLDB_DEBUGSERVER_PATH") != nullptr)
+                return;
+
+            for (const std::filesystem::path& candidate : candidates)
+            {
+                std::error_code error;
+
+                if (!std::filesystem::exists(candidate, error))
+                    continue;
+
+                set_environment("LLDB_DEBUGSERVER_PATH", candidate.string());
+                Log::debug("debugger: using debug server '{}'", candidate.string());
+
+                return;
+            }
+
+            Log::warn("debugger: no debug server found, launching a target will fail");
+        }
+
+        auto read_back(lldb::SBTarget& target, lldb::SBBreakpoint& source, Breakpoint& breakpoint) -> void
+        {
+            breakpoint.enabled = source.IsEnabled();
+            breakpoint.hit_count = source.GetHitCount();
+
+            // lldb only calls a location resolved once a process has it mapped, but
+            // for the ui the question is whether it found somewhere to put it at all
+            breakpoint.resolved = source.GetNumLocations() > 0;
+
+            if (source.GetNumLocations() == 0)
+            {
+                breakpoint.address = 0;
+                return;
+            }
+
+            lldb::SBBreakpointLocation location = source.GetLocationAtIndex(0);
+            lldb::SBAddress address = location.GetAddress();
+
+            const lldb::addr_t load_address = address.GetLoadAddress(target);
+            breakpoint.address = load_address != LLDB_INVALID_ADDRESS ? load_address
+                                                                      : address.GetFileAddress();
+
+            lldb::SBSymbolContext context = address.GetSymbolContext(lldb::eSymbolContextEverything);
+
+            if (const char* name = context.GetFunction().GetName(); name != nullptr)
+                breakpoint.function = name;
+            else if (const char* symbol = context.GetSymbol().GetName(); symbol != nullptr)
+                breakpoint.function = symbol;
+
+            lldb::SBLineEntry line_entry = context.GetLineEntry();
+
+            if (breakpoint.line != 0 && line_entry.IsValid())
+                breakpoint.line = line_entry.GetLine();
+        }
+
         // every call site reports itself, so the stubs stay one line each until
         // there is an lldb session behind them
         auto not_implemented(std::source_location location = std::source_location::current())
@@ -19,14 +121,37 @@ namespace Hsdbg
         }
     }
 
-    Debugger::Debugger()
+    struct Debugger::Session
     {
-        Log::info("debugger: ready");
+        lldb::SBDebugger debugger;
+        lldb::SBTarget target;
+    };
+
+    Debugger::Debugger()
+        : m_session(std::make_unique<Session>())
+    {
+        adopt_debug_server();
+
+        lldb::SBDebugger::Initialize();
+
+        m_session->debugger = lldb::SBDebugger::Create();
+        m_session->debugger.SetAsync(true);
+
+        HSDBG_ASSERT(m_session->debugger.IsValid(), "failed to create the lldb debugger");
+
+        Log::info("debugger: {}", lldb::SBDebugger::GetVersionString());
     }
 
     Debugger::~Debugger()
     {
         unload_target();
+
+        if (m_session->debugger.IsValid())
+            lldb::SBDebugger::Destroy(m_session->debugger);
+
+        m_session.reset();
+
+        lldb::SBDebugger::Terminate();
     }
 
     auto Debugger::load_target(const std::filesystem::path& executable) -> Result<void>
@@ -43,11 +168,42 @@ namespace Hsdbg
         if (error)
             m_target_path = executable;
 
+        lldb::SBError create_error;
+        lldb::SBTarget target = m_session->debugger.CreateTarget(m_target_path.string().c_str(),
+                                                                 nullptr,
+                                                                 nullptr,
+                                                                 true,
+                                                                 create_error);
+
+        if (!target.IsValid())
+        {
+            const char* reason = create_error.GetCString();
+
+            m_target_path.clear();
+
+            return fail("could not load '{}': {}",
+                        executable.string(),
+                        reason != nullptr ? reason : "unknown error");
+        }
+
+        if (m_session->target.IsValid())
+            m_session->debugger.DeleteTarget(m_session->target);
+
+        m_session->target = target;
+
         m_process_id = 0;
         m_stop_reason = StopReason::None;
         set_state(TargetState::Loaded);
 
-        Log::info("debugger: loaded target '{}'", m_target_path.string());
+        const char* triple = m_session->target.GetTriple();
+
+        Log::info("debugger: loaded target '{}' ({})",
+                  m_target_path.string(),
+                  triple != nullptr ? triple : "unknown triple");
+
+        // breakpoints set before a target existed are only requests until now
+        for (Breakpoint& breakpoint : m_breakpoints)
+            resolve_breakpoint(breakpoint);
 
         return {};
     }
@@ -69,9 +225,17 @@ namespace Hsdbg
 
         for (Breakpoint& breakpoint : m_breakpoints)
         {
+            breakpoint.backend_id = 0;
             breakpoint.resolved = false;
             breakpoint.hit_count = 0;
             breakpoint.address = 0;
+        }
+
+        if (m_session->target.IsValid())
+        {
+            m_session->target.DeleteAllBreakpoints();
+            m_session->debugger.DeleteTarget(m_session->target);
+            m_session->target = lldb::SBTarget();
         }
 
         set_state(TargetState::NoTarget);
@@ -149,6 +313,7 @@ namespace Hsdbg
         breakpoint.line = line;
 
         m_breakpoints.push_back(std::move(breakpoint));
+        resolve_breakpoint(m_breakpoints.back());
 
         Log::info("debugger: breakpoint {} at {}:{}",
                   m_breakpoints.back().id,
@@ -173,6 +338,7 @@ namespace Hsdbg
         breakpoint.function = function;
 
         m_breakpoints.push_back(std::move(breakpoint));
+        resolve_breakpoint(m_breakpoints.back());
 
         Log::info("debugger: breakpoint {} at {}()", m_breakpoints.back().id, function);
 
@@ -184,6 +350,9 @@ namespace Hsdbg
         const auto entry = std::ranges::find(m_breakpoints, id, &Breakpoint::id);
         if (entry == m_breakpoints.end())
             return false;
+
+        if (entry->backend_id != 0 && m_session->target.IsValid())
+            m_session->target.BreakpointDelete(entry->backend_id);
 
         m_breakpoints.erase(entry);
 
@@ -200,11 +369,22 @@ namespace Hsdbg
 
         breakpoint->enabled = enabled;
 
+        if (breakpoint->backend_id != 0 && m_session->target.IsValid())
+        {
+            lldb::SBBreakpoint source = m_session->target.FindBreakpointByID(breakpoint->backend_id);
+
+            if (source.IsValid())
+                source.SetEnabled(enabled);
+        }
+
         return true;
     }
 
     auto Debugger::clear_breakpoints() -> void
     {
+        if (m_session->target.IsValid())
+            m_session->target.DeleteAllBreakpoints();
+
         m_breakpoints.clear();
     }
 
@@ -252,6 +432,72 @@ namespace Hsdbg
 
     auto Debugger::update() -> void
     {
+        sync_breakpoints();
+    }
+
+    auto Debugger::resolve_breakpoint(Breakpoint& breakpoint) -> void
+    {
+        if (!m_session->target.IsValid())
+            return;
+
+        lldb::SBBreakpoint created;
+
+        if (breakpoint.line == 0)
+        {
+            // unscoped, a name like main matches every module the target pulls in
+            created = m_session->target.BreakpointCreateByName(
+                breakpoint.function.c_str(), m_session->target.GetExecutable().GetFilename());
+        }
+        else
+        {
+            created = m_session->target.BreakpointCreateByLocation(breakpoint.file.string().c_str(),
+                                                                   breakpoint.line);
+
+            // debug info records whatever path the compiler saw, which rarely
+            // matches what the user opened, so fall back to the file name alone
+            if (created.GetNumLocations() == 0 && breakpoint.file.has_parent_path())
+            {
+                m_session->target.BreakpointDelete(created.GetID());
+
+                created = m_session->target.BreakpointCreateByLocation(
+                    breakpoint.file.filename().string().c_str(), breakpoint.line);
+            }
+        }
+
+        if (!created.IsValid())
+        {
+            Log::warn("debugger: lldb refused breakpoint {}", breakpoint.id);
+            return;
+        }
+
+        created.SetEnabled(breakpoint.enabled);
+
+        breakpoint.backend_id = created.GetID();
+
+        read_back(m_session->target, created, breakpoint);
+
+        Log::debug("debugger: breakpoint {} {} ({} locations)",
+                   breakpoint.id,
+                   breakpoint.resolved ? "resolved" : "pending",
+                   created.GetNumLocations());
+    }
+
+    auto Debugger::sync_breakpoints() -> void
+    {
+        if (!m_session->target.IsValid())
+            return;
+
+        for (Breakpoint& breakpoint : m_breakpoints)
+        {
+            if (breakpoint.backend_id == 0)
+                continue;
+
+            lldb::SBBreakpoint source = m_session->target.FindBreakpointByID(breakpoint.backend_id);
+            if (!source.IsValid())
+                continue;
+
+            read_back(m_session->target, source, breakpoint);
+        }
     }
 
     auto Debugger::set_state(TargetState state) -> void

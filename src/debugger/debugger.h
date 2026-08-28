@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -76,7 +77,14 @@ namespace Hsdbg
         auto is_stopped() const -> bool { return m_state == TargetState::Stopped; }
 
     private:
+        // keeps the lldb headers out of everything that talks to the debugger
+        struct Session;
+
         auto set_state(TargetState state) -> void;
+        auto resolve_breakpoint(Breakpoint& breakpoint) -> void;
+        auto sync_breakpoints() -> void;
+
+        std::unique_ptr<Session> m_session;
 
         TargetState m_state = TargetState::NoTarget;
         StopReason m_stop_reason = StopReason::None;

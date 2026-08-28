@@ -1,11 +1,113 @@
 output_dir = "%{cfg.buildcfg}-%{cfg.system}"
 
+llvm_version = "22.1.0"
+llvm_vendored_dir = "ext/llvm"
+
+function llvm_release_asset()
+    local host = os.host()
+    local arm = os.hostarch() == "ARM64" or os.hostarch() == "arm64"
+
+    if host == "macosx" then
+        return "LLVM-" .. llvm_version .. "-macOS-ARM64.tar.xz"
+    elseif host == "linux" then
+        return "LLVM-" .. llvm_version .. (arm and "-Linux-ARM64" or "-Linux-X64") .. ".tar.xz"
+    elseif host == "windows" then
+        return "clang+llvm-" .. llvm_version ..
+            (arm and "-aarch64-pc-windows-msvc" or "-x86_64-pc-windows-msvc") .. ".tar.xz"
+    end
+
+    return nil
+end
+
+function llvm_prefix()
+    local function usable(candidate)
+        if candidate == nil or candidate == "" then
+            return nil
+        end
+
+        local prefix = path.getabsolute(
+            (candidate:gsub("%s+$", "")):gsub("\\", "/"), _MAIN_SCRIPT_DIR)
+
+        return os.isdir(prefix .. "/include/lldb") and prefix or nil
+    end
+
+    local function newest_of(pattern)
+        local matches = os.matchdirs(pattern)
+        table.sort(matches)
+
+        for index = #matches, 1, -1 do
+            local prefix = usable(matches[index])
+
+            if prefix ~= nil then
+                return prefix
+            end
+        end
+
+        return nil
+    end
+
+    local prefix = usable(os.getenv("LLVM_PREFIX"))
+        or usable(llvm_vendored_dir)
+        or usable(os.outputof("llvm-config --prefix"))
+
+    if prefix == nil and os.host() == "windows" then
+        prefix = usable(os.getenv("ProgramFiles") and os.getenv("ProgramFiles") .. "/LLVM")
+            or newest_of("C:/Program Files/LLVM*")
+    end
+
+    if prefix == nil and os.host() == "macosx" then
+        prefix = usable(os.outputof("brew --prefix llvm"))
+    end
+
+    if prefix == nil and os.host() == "linux" then
+        prefix = newest_of("/usr/lib/llvm-*") or newest_of("/usr/local/llvm*")
+    end
+
+    return prefix
+end
+
+llvm_dir = llvm_prefix()
+
+if llvm_dir == nil and _ACTION ~= nil and _ACTION ~= "fetch-llvm" and _ACTION ~= "clean" then
+    error("no llvm with lldb headers found. install one and set LLVM_PREFIX, " ..
+        "or run `premake5 fetch-llvm` to download the pinned " .. llvm_version .. " release")
+end
+
+llvm_dir = llvm_dir or ""
+
 include_dir = {
     glfw = "ext/glfw/include",
     glad = "ext/glad/include",
     imgui = "ext/imgui",
     imgui_backends = "ext/imgui/backends",
+    lldb = llvm_dir .. "/include",
 }
+
+library_dir = {
+    lldb = llvm_dir .. "/lib",
+}
+
+function lldb_library()
+    if llvm_dir == "" then
+        return ""
+    end
+
+    local names = { "liblldb.dylib", "liblldb.so", "liblldb.lib" }
+
+    for _, name in ipairs(names) do
+        local candidate = library_dir.lldb .. "/" .. name
+
+        if os.isfile(candidate) then
+            return candidate
+        end
+    end
+
+    local versioned = os.matchfiles(library_dir.lldb .. "/liblldb.so.*")
+    table.sort(versioned)
+
+    return versioned[#versioned]
+        or error("llvm at " .. llvm_dir .. " has lldb headers but no liblldb in " .. library_dir.lldb)
+end
 
 function setup_target()
     targetdir ("bin/" .. output_dir)
@@ -40,13 +142,90 @@ newaction {
     execute = function()
         os.rmdir("bin")
         os.rmdir("bin-int")
+        os.rmdir(".vs")
         os.remove("Makefile")
 
-        for _, file in ipairs(os.matchfiles("*.make")) do
-            os.remove(file)
+        local patterns = { "*.make", "*.sln", "*.vcxproj", "*.vcxproj.*" }
+
+        for _, pattern in ipairs(patterns) do
+            for _, file in ipairs(os.matchfiles(pattern)) do
+                os.remove(file)
+            end
         end
 
         print("Cleaned build output and generated project files")
+    end
+}
+
+newaction {
+    trigger = "fetch-llvm",
+    description = "Download the pinned llvm release into " .. llvm_vendored_dir,
+
+    execute = function()
+        if os.isdir(llvm_vendored_dir .. "/include/lldb") then
+            print(llvm_vendored_dir .. " already has an llvm with lldb headers")
+            return
+        end
+
+        local asset = llvm_release_asset()
+
+        if asset == nil then
+            error("no pinned llvm release for " .. os.host() .. " " .. os.hostarch() ..
+                ", install llvm yourself and set LLVM_PREFIX")
+        end
+
+        local archive = "ext/" .. asset
+        local staging = "ext/llvm-staging"
+
+        if not os.isfile(archive) then
+            local url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-" ..
+                llvm_version .. "/" .. asset
+
+            print("downloading " .. url)
+
+            local reported = 0
+            local result, code = http.download(url, archive, {
+                progress = function(total, current)
+                    if total > 0 and current - reported >= total / 20 then
+                        reported = current
+                        printf("  %d%% (%.0f mb)", math.floor(current / total * 100), current / 1048576)
+                    end
+                end
+            })
+
+            if result ~= "OK" then
+                os.remove(archive)
+                error("download failed with " .. tostring(code) .. ": " .. tostring(result))
+            end
+        end
+
+        os.rmdir(staging)
+        os.mkdir(staging)
+
+        print("extracting " .. asset)
+
+        local extracted = os.execute('tar -xf "' .. archive .. '" -C "' .. staging .. '"')
+
+        if extracted ~= true and extracted ~= 0 then
+            error("could not extract " .. archive .. ", unpack it into " .. llvm_vendored_dir .. " by hand")
+        end
+
+        local unpacked = os.matchdirs(staging .. "/*")[1]
+
+        if unpacked == nil then
+            error(archive .. " did not contain an llvm directory")
+        end
+
+        os.rmdir(llvm_vendored_dir)
+
+        if not os.rename(unpacked, llvm_vendored_dir) then
+            error("could not move " .. unpacked .. " to " .. llvm_vendored_dir)
+        end
+
+        os.rmdir(staging)
+        os.remove(archive)
+
+        print("llvm " .. llvm_version .. " is ready in " .. llvm_vendored_dir)
     end
 }
 
@@ -265,6 +444,7 @@ project "hsdbg"
         "%{include_dir.glad}",
         "%{include_dir.imgui}",
         "%{include_dir.imgui_backends}",
+        "%{include_dir.lldb}",
     }
 
     links {
@@ -273,9 +453,20 @@ project "hsdbg"
         "imgui",
     }
 
+    defines { "HSDBG_LLVM_PREFIX=\"" .. llvm_dir .. "\"" }
+
+    linkoptions { lldb_library() }
+
     filter "system:windows"
         systemversion "latest"
+
         links "opengl32"
+
+        postbuildcommands {
+            '{COPYFILE} "' .. llvm_dir .. '/bin/liblldb.dll" "%{cfg.targetdir}"',
+        }
+    filter "system:not windows"
+        linkoptions { "-Wl,-rpath," .. library_dir.lldb }
     filter "system:linux"
         links {
             "GL",

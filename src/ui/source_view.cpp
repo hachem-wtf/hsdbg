@@ -192,10 +192,14 @@ namespace Hsdbg
 
                 if (breakpoint != nullptr)
                 {
-                    draw_list->AddCircleFilled(marker_center,
-                                               BREAKPOINT_RADIUS,
-                                               breakpoint->enabled ? BREAKPOINT_COLOR
-                                                                   : BREAKPOINT_DISABLED_COLOR);
+                    const ImU32 color = breakpoint->enabled ? BREAKPOINT_COLOR
+                                                            : BREAKPOINT_DISABLED_COLOR;
+
+                    // hollow until lldb finds somewhere to actually put it
+                    if (breakpoint->resolved)
+                        draw_list->AddCircleFilled(marker_center, BREAKPOINT_RADIUS, color);
+                    else
+                        draw_list->AddCircle(marker_center, BREAKPOINT_RADIUS, color, 0, 1.5f);
                 }
                 else if (gutter_hovered)
                 {

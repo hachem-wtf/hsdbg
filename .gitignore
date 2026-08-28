@@ -18,3 +18,8 @@ compile_flags.txt
 
 # imgui layout state
 imgui.ini
+
+# llvm pulled down by `premake5 fetch-llvm`
+ext/llvm/
+ext/llvm-staging/
+ext/*.tar.xz

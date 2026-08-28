@@ -75,5 +75,6 @@ namespace Hsdbg
         bool m_layout_built = false;
         bool m_console_scroll_pending = false;
         bool m_load_target_pending = false;
+        bool m_focus_breakpoints = false;
     };
 }

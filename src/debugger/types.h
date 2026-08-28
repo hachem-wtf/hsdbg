@@ -78,6 +78,7 @@ namespace Hsdbg
     struct Breakpoint
     {
         uint32_t id = 0;
+        int32_t backend_id = 0;
         std::filesystem::path file;
         uint32_t line = 0;
         std::string function;

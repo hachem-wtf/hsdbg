@@ -28,8 +28,8 @@ namespace Hsdbg
 
         constexpr const char* LOAD_TARGET_POPUP = "load target";
 
-        // macos gives us a 4.1 core context, which speaks glsl 1.50
-        // #portability
+        // the lowest glsl that every 3.2+ core profile accepts, and the window
+        // asks for a 3.3 core context on all three platforms
         constexpr const char* GLSL_VERSION = "#version 150";
 
         constexpr size_t MAX_CONSOLE_LINES = 2048;
@@ -173,6 +173,9 @@ namespace Hsdbg
         {
             build_default_layout(dockspace_id);
             m_layout_built = true;
+
+            // otherwise whichever panel happens to be submitted last wins the tab
+            m_focus_breakpoints = true;
         }
 
         draw_status_bar(debugger);
@@ -190,6 +193,14 @@ namespace Hsdbg
 
         if (m_visible.demo)
             ImGui::ShowDemoWindow(&m_visible.demo);
+
+        // a window claims its tab when it is first submitted, so this can only be
+        // asked for once every panel in the node exists
+        if (m_focus_breakpoints)
+        {
+            ImGui::SetWindowFocus(PANEL_BREAKPOINTS);
+            m_focus_breakpoints = false;
+        }
     }
 
     auto Ui::build_default_layout(uint32_t dockspace_id) -> void
@@ -466,11 +477,12 @@ namespace Hsdbg
                                                   ImGuiTableFlags_SizingStretchProp |
                                                   ImGuiTableFlags_ScrollY;
 
-                if (ImGui::BeginTable("##breakpoints", 5, flags))
+                if (ImGui::BeginTable("##breakpoints", 6, flags))
                 {
                     ImGui::TableSetupColumn("on", ImGuiTableColumnFlags_WidthFixed, 26.0f);
                     ImGui::TableSetupColumn("id", ImGuiTableColumnFlags_WidthFixed, 30.0f);
                     ImGui::TableSetupColumn("location");
+                    ImGui::TableSetupColumn("address");
                     ImGui::TableSetupColumn("hits", ImGuiTableColumnFlags_WidthFixed, 40.0f);
                     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 26.0f);
                     ImGui::TableSetupScrollFreeze(0, 1);
@@ -505,6 +517,19 @@ namespace Hsdbg
 
                         if (ImGui::IsItemHovered() && !breakpoint.file.empty())
                             ImGui::SetTooltip("%s", breakpoint.file.string().c_str());
+
+                        ImGui::TableNextColumn();
+                        if (breakpoint.resolved)
+                        {
+                            ImGui::Text("0x%llx", static_cast<unsigned long long>(breakpoint.address));
+
+                            if (ImGui::IsItemHovered() && !breakpoint.function.empty())
+                                ImGui::SetTooltip("%s", breakpoint.function.c_str());
+                        }
+                        else
+                        {
+                            ImGui::TextDisabled("pending");
+                        }
 
                         ImGui::TableNextColumn();
                         ImGui::Text("%u", breakpoint.hit_count);
