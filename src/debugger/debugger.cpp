@@ -135,7 +135,9 @@ namespace Hsdbg
 
             breakpoint.line = line_entry.GetLine();
 
-            if (breakpoint.by_function)
+            // only a file and line breakpoint was told where it belongs, the rest
+            // learn it from wherever lldb landed
+            if (breakpoint.by_function || breakpoint.by_address)
                 breakpoint.file = path_of(line_entry.GetFileSpec());
         }
 
@@ -190,6 +192,10 @@ namespace Hsdbg
         constexpr uint32_t MAX_VARIABLE_DEPTH = 3;
         constexpr uint32_t MAX_VARIABLE_CHILDREN = 64;
 
+        // only used for frames lldb cannot name, where there is no function to
+        // bound the listing
+        constexpr uint32_t DISASSEMBLY_WINDOW = 64;
+
         auto frame_of(lldb::SBProcess& process, uint64_t thread_id, uint32_t frame_index) -> lldb::SBFrame
         {
             lldb::SBThread thread = process.GetThreadByID(thread_id);
@@ -198,6 +204,114 @@ namespace Hsdbg
                 return {};
 
             return thread.GetFrameAtIndex(frame_index);
+        }
+
+        auto instruction_of(lldb::SBTarget& target,
+                            lldb::SBInstruction source,
+                            lldb::addr_t program_counter) -> Instruction
+        {
+            Instruction entry;
+
+            if (!source.IsValid())
+                return entry;
+
+            lldb::SBAddress address = source.GetAddress();
+            const lldb::addr_t load = address.GetLoadAddress(target);
+
+            entry.file_address = address.GetFileAddress();
+            entry.address = load != LLDB_INVALID_ADDRESS ? load : entry.file_address;
+            entry.mnemonic = text_or(source.GetMnemonic(target), "?");
+            entry.operands = text_or(source.GetOperands(target), "");
+            entry.comment = text_or(source.GetComment(target), "");
+            entry.size = static_cast<uint32_t>(source.GetByteSize());
+            entry.current = program_counter != LLDB_INVALID_ADDRESS &&
+                            entry.address == program_counter;
+
+            return entry;
+        }
+
+        auto instructions_of(lldb::SBTarget& target,
+                             lldb::SBInstructionList source,
+                             lldb::addr_t program_counter) -> std::vector<Instruction>
+        {
+            std::vector<Instruction> instructions;
+
+            for (uint32_t index = 0; index < source.GetSize(); ++index)
+            {
+                Instruction entry = instruction_of(target, source.GetInstructionAtIndex(index), program_counter);
+
+                if (entry.file_address == 0 && entry.mnemonic.empty())
+                    continue;
+
+                instructions.push_back(std::move(entry));
+            }
+
+            return instructions;
+        }
+
+        auto module_symbols(lldb::SBTarget& target) -> std::vector<Symbol>
+        {
+            std::vector<Symbol> symbols;
+
+            lldb::SBModule module = target.FindModule(target.GetExecutable());
+
+            if (!module.IsValid())
+                return symbols;
+
+            struct Candidate
+            {
+                uint64_t file_address = 0;
+                uint64_t size = 0;
+                lldb::SBSymbol symbol;
+            };
+
+            std::vector<Candidate> candidates;
+
+            for (size_t index = 0; index < module.GetNumSymbols(); ++index)
+            {
+                lldb::SBSymbol symbol = module.GetSymbolAtIndex(index);
+
+                if (!symbol.IsValid() || symbol.GetType() != lldb::eSymbolTypeCode)
+                    continue;
+
+                lldb::SBAddress start = symbol.GetStartAddress();
+
+                if (!start.IsValid())
+                    continue;
+
+                candidates.push_back({ start.GetFileAddress(), symbol.GetSize(), symbol });
+            }
+
+            std::ranges::sort(candidates, [](const Candidate& left, const Candidate& right)
+            {
+                if (left.file_address != right.file_address)
+                    return left.file_address < right.file_address;
+
+                return left.size > right.size;
+            });
+
+            uint64_t previous = LLDB_INVALID_ADDRESS;
+
+            for (Candidate& candidate : candidates)
+            {
+                if (candidate.file_address == previous)
+                    continue;
+
+                previous = candidate.file_address;
+
+                const lldb::addr_t load = candidate.symbol.GetStartAddress().GetLoadAddress(target);
+
+                Symbol entry;
+                entry.name = text_or(candidate.symbol.GetDisplayName(),
+                                     text_or(candidate.symbol.GetName(), "?"));
+                entry.file_address = candidate.file_address;
+                entry.address = load != LLDB_INVALID_ADDRESS ? load : candidate.file_address;
+                entry.size = candidate.size;
+
+                symbols.push_back(std::move(entry));
+            }
+
+            return symbols;
         }
 
         auto display_of(lldb::SBValue& value) -> std::string
@@ -341,6 +455,11 @@ namespace Hsdbg
         for (Breakpoint& breakpoint : m_breakpoints)
             resolve_breakpoint(breakpoint);
 
+        m_disassembly.clear();
+        m_disassembly_name.clear();
+        m_selected_symbol = 0;
+        refresh_disassembly();
+
         return {};
     }
 
@@ -360,21 +479,25 @@ namespace Hsdbg
         m_call_stack.clear();
         m_locals.clear();
         m_registers.clear();
+        m_symbols.clear();
+        m_disassembly.clear();
+        m_disassembly_name.clear();
         m_console_output.clear();
 
         m_selected_thread = 0;
         m_selected_frame = 0;
+        m_selected_symbol = 0;
 
         for (Breakpoint& breakpoint : m_breakpoints)
         {
             breakpoint.backend_id = 0;
             breakpoint.resolved = false;
             breakpoint.hit_count = 0;
-            breakpoint.address = 0;
+            breakpoint.address = breakpoint.by_address ? breakpoint.file_address : 0;
 
             // whatever lldb told us about a named breakpoint belonged to the
             // binary that just went away
-            if (breakpoint.by_function)
+            if (breakpoint.by_function || breakpoint.by_address)
             {
                 breakpoint.file.clear();
                 breakpoint.line = 0;
@@ -727,6 +850,30 @@ namespace Hsdbg
         return m_breakpoints.back().id;
     }
 
+    auto Debugger::add_address_breakpoint(uint64_t file_address) -> uint32_t
+    {
+        const auto existing = std::ranges::find_if(m_breakpoints, [&](const Breakpoint& candidate)
+        {
+            return candidate.by_address && candidate.file_address == file_address;
+        });
+
+        if (existing != m_breakpoints.end())
+            return existing->id;
+
+        Breakpoint breakpoint;
+        breakpoint.id = m_next_breakpoint_id++;
+        breakpoint.by_address = true;
+        breakpoint.file_address = file_address;
+        breakpoint.address = file_address;
+
+        m_breakpoints.push_back(std::move(breakpoint));
+        resolve_breakpoint(m_breakpoints.back());
+
+        Log::info("debugger: breakpoint {} at 0x{:x}", m_breakpoints.back().id, file_address);
+
+        return m_breakpoints.back().id;
+    }
+
     auto Debugger::remove_breakpoint(uint32_t id) -> bool
     {
         const auto entry = std::ranges::find(m_breakpoints, id, &Breakpoint::id);
@@ -910,6 +1057,16 @@ namespace Hsdbg
         return true;
     }
 
+    auto Debugger::select_symbol(uint64_t file_address) -> bool
+    {
+        if (!m_session->target.IsValid() || file_address == 0)
+            return false;
+
+        load_disassembly(file_address);
+
+        return !m_disassembly.empty();
+    }
+
     auto Debugger::update() -> void
     {
         pump_events();
@@ -975,6 +1132,11 @@ namespace Hsdbg
                 case lldb::eStateStepping:
                     m_locals.clear();
                     m_registers.clear();
+
+                    // the instructions are still the ones on screen, only the
+                    // program counter stopped meaning anything
+                    for (Instruction& instruction : m_disassembly)
+                        instruction.current = false;
                     set_state(TargetState::Running);
                     break;
 
@@ -1129,6 +1291,9 @@ namespace Hsdbg
         m_selected_thread = 0;
         m_selected_frame = 0;
 
+        // the target outlives the process, so fall back to reading the binary
+        refresh_disassembly();
+
         set_state(TargetState::Exited);
     }
 
@@ -1173,6 +1338,8 @@ namespace Hsdbg
         m_locals.clear();
         m_registers.clear();
 
+        refresh_disassembly();
+
         if (!is_alive(m_session->process))
             return;
 
@@ -1215,6 +1382,155 @@ namespace Hsdbg
         }
     }
 
+    auto Debugger::refresh_symbols() -> void
+    {
+        m_symbols.clear();
+
+        if (!m_session->target.IsValid())
+            return;
+
+        m_symbols = module_symbols(m_session->target);
+    }
+
+    auto Debugger::load_disassembly(uint64_t file_address) -> void
+    {
+        m_disassembly.clear();
+        m_disassembly_name.clear();
+        m_selected_symbol = 0;
+
+        if (!m_session->target.IsValid() || file_address == 0)
+            return;
+
+        lldb::SBAddress address = m_session->target.ResolveFileAddress(file_address);
+
+        if (!address.IsValid())
+            return;
+
+        lldb::addr_t program_counter = LLDB_INVALID_ADDRESS;
+
+        if (is_alive(m_session->process))
+        {
+            lldb::SBFrame frame = frame_of(m_session->process, m_selected_thread, m_selected_frame);
+
+            if (frame.IsValid())
+                program_counter = frame.GetPC();
+        }
+
+        lldb::SBSymbolContext context = address.GetSymbolContext(lldb::eSymbolContextEverything);
+        lldb::SBInstructionList instructions;
+        std::string name;
+
+        if (lldb::SBFunction function = context.GetFunction(); function.IsValid())
+        {
+            instructions = function.GetInstructions(m_session->target);
+            name = text_or(function.GetDisplayName(), text_or(function.GetName(), "?"));
+        }
+        else if (lldb::SBSymbol symbol = context.GetSymbol(); symbol.IsValid())
+        {
+            instructions = symbol.GetInstructions(m_session->target);
+            name = text_or(symbol.GetDisplayName(), text_or(symbol.GetName(), "?"));
+        }
+        else
+        {
+            instructions = m_session->target.ReadInstructions(address, DISASSEMBLY_WINDOW);
+            name = std::format("{:#x}", file_address);
+        }
+
+        m_disassembly = instructions_of(m_session->target, instructions, program_counter);
+        m_disassembly_name = std::move(name);
+        m_selected_symbol = file_address;
+    }
+
+    auto Debugger::refresh_disassembly() -> void
+    {
+        if (!m_session->target.IsValid())
+        {
+            m_symbols.clear();
+            m_disassembly.clear();
+            m_disassembly_name.clear();
+            m_selected_symbol = 0;
+            return;
+        }
+
+        if (m_symbols.empty())
+            refresh_symbols();
+
+        for (Symbol& symbol : m_symbols)
+        {
+            lldb::SBAddress address = m_session->target.ResolveFileAddress(symbol.file_address);
+            const lldb::addr_t load = address.IsValid()
+                ? address.GetLoadAddress(m_session->target)
+                : LLDB_INVALID_ADDRESS;
+
+            symbol.address = load != LLDB_INVALID_ADDRESS ? load : symbol.file_address;
+        }
+
+        lldb::SBFrame frame;
+        lldb::addr_t program_counter = LLDB_INVALID_ADDRESS;
+        lldb::addr_t file_pc = LLDB_INVALID_ADDRESS;
+
+        if (is_alive(m_session->process))
+            frame = frame_of(m_session->process, m_selected_thread, m_selected_frame);
+
+        if (frame.IsValid())
+        {
+            program_counter = frame.GetPC();
+            file_pc = frame.GetPCAddress().GetFileAddress();
+        }
+
+        uint64_t wanted = m_selected_symbol;
+
+        if (file_pc != LLDB_INVALID_ADDRESS)
+        {
+            const auto containing = std::ranges::find_if(m_symbols, [&](const Symbol& symbol)
+            {
+                if (symbol.size == 0)
+                    return symbol.file_address == file_pc;
+
+                return file_pc >= symbol.file_address &&
+                       file_pc < symbol.file_address + symbol.size;
+            });
+
+            if (containing != m_symbols.end())
+            {
+                wanted = containing->file_address;
+            }
+            else if (lldb::SBFunction function = frame.GetFunction(); function.IsValid())
+            {
+                wanted = function.GetStartAddress().GetFileAddress();
+            }
+            else if (lldb::SBSymbol symbol = frame.GetSymbol(); symbol.IsValid())
+            {
+                wanted = symbol.GetStartAddress().GetFileAddress();
+            }
+        }
+
+        if (wanted == 0)
+        {
+            const auto main = std::ranges::find(m_symbols, "main", &Symbol::name);
+            wanted = main != m_symbols.end() ? main->file_address
+                                             : (m_symbols.empty() ? 0 : m_symbols.front().file_address);
+        }
+
+        if (wanted != 0 && (wanted != m_selected_symbol || m_disassembly.empty()))
+        {
+            load_disassembly(wanted);
+            return;
+        }
+
+        for (Instruction& instruction : m_disassembly)
+        {
+            lldb::SBAddress address = m_session->target.ResolveFileAddress(instruction.file_address);
+            const lldb::addr_t load = address.IsValid()
+                ? address.GetLoadAddress(m_session->target)
+                : LLDB_INVALID_ADDRESS;
+
+            instruction.address = load != LLDB_INVALID_ADDRESS ? load : instruction.file_address;
+            instruction.current = program_counter != LLDB_INVALID_ADDRESS &&
+                                  instruction.address == program_counter;
+        }
+    }
+
     auto Debugger::resolve_breakpoint(Breakpoint& breakpoint) -> void
     {
         if (!m_session->target.IsValid())
@@ -1222,7 +1538,16 @@ namespace Hsdbg
 
         lldb::SBBreakpoint created;
 
-        if (breakpoint.by_function)
+        if (breakpoint.by_address)
+        {
+            // a section relative address keeps pointing at the same instruction
+            // when the next run loads the binary somewhere else
+            lldb::SBAddress address = m_session->target.ResolveFileAddress(breakpoint.file_address);
+
+            if (address.IsValid())
+                created = m_session->target.BreakpointCreateBySBAddress(address);
+        }
+        else if (breakpoint.by_function)
         {
             // unscoped, a name like main matches every module the target pulls in
             created = m_session->target.BreakpointCreateByName(

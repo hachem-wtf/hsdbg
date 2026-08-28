@@ -43,6 +43,7 @@ namespace Hsdbg
         // breakpoints, the only part that keeps real state for now
         auto add_breakpoint(const std::filesystem::path& file, uint32_t line) -> uint32_t;
         auto add_function_breakpoint(std::string_view function) -> uint32_t;
+        auto add_address_breakpoint(uint64_t file_address) -> uint32_t;
         auto remove_breakpoint(uint32_t id) -> bool;
         auto set_breakpoint_enabled(uint32_t id, bool enabled) -> bool;
         auto set_breakpoint_condition(uint32_t id, std::string_view condition) -> bool;
@@ -56,6 +57,9 @@ namespace Hsdbg
         auto call_stack() const -> std::span<const StackFrame> { return m_call_stack; }
         auto locals() const -> std::span<const Variable> { return m_locals; }
         auto registers() const -> std::span<const Register> { return m_registers; }
+        auto symbols() const -> std::span<const Symbol> { return m_symbols; }
+        auto disassembly() const -> std::span<const Instruction> { return m_disassembly; }
+        auto disassembly_name() const -> std::string_view { return m_disassembly_name; }
         auto evaluate(std::string_view expression) -> Result<std::string>;
         auto read_memory(uint64_t address, size_t size) -> Result<std::vector<uint8_t>>;
         auto console_output() const -> std::span<const std::string> { return m_console_output; }
@@ -63,8 +67,10 @@ namespace Hsdbg
         // selection, what the ui is currently looking at
         auto select_thread(uint64_t thread_id) -> bool;
         auto select_frame(uint32_t frame_index) -> bool;
+        auto select_symbol(uint64_t file_address) -> bool;
         auto selected_thread() const -> uint64_t { return m_selected_thread; }
         auto selected_frame() const -> uint32_t { return m_selected_frame; }
+        auto selected_symbol() const -> uint64_t { return m_selected_symbol; }
 
         // pumps whatever the debug session has to say, called once per frame
         auto update() -> void;
@@ -99,6 +105,9 @@ namespace Hsdbg
         auto on_exited() -> void;
         auto refresh_call_stack() -> void;
         auto refresh_frame_data() -> void;
+        auto refresh_symbols() -> void;
+        auto refresh_disassembly() -> void;
+        auto load_disassembly(uint64_t file_address) -> void;
 
         std::unique_ptr<Session> m_session;
 
@@ -115,10 +124,14 @@ namespace Hsdbg
         std::vector<StackFrame> m_call_stack;
         std::vector<Variable> m_locals;
         std::vector<Register> m_registers;
+        std::vector<Symbol> m_symbols;
+        std::vector<Instruction> m_disassembly;
+        std::string m_disassembly_name;
         std::vector<std::string> m_console_output;
 
         uint64_t m_selected_thread = 0;
         uint32_t m_selected_frame = 0;
+        uint64_t m_selected_symbol = 0;
         uint64_t m_stop_count = 0;
     };
 }

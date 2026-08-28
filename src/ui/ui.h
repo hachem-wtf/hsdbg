@@ -42,6 +42,8 @@ namespace Hsdbg
             bool threads = true;
             bool locals = true;
             bool registers = true;
+            bool symbols = true;
+            bool disassembly = true;
             bool console = true;
             bool demo = false;
         };
@@ -60,12 +62,15 @@ namespace Hsdbg
         auto draw_threads_panel(Debugger& debugger) -> void;
         auto draw_locals_panel(Debugger& debugger) -> void;
         auto draw_registers_panel(Debugger& debugger) -> void;
+        auto draw_symbols_panel(Debugger& debugger) -> void;
+        auto draw_disassembly_panel(Debugger& debugger) -> void;
         auto draw_console_panel(Debugger& debugger) -> void;
 
         auto push_console(std::string line) -> void;
         auto report(const Result<void>& result, std::string_view action) -> void;
 
         auto follow_stop(Debugger& debugger) -> void;
+        auto follow_target(Debugger& debugger) -> void;
         auto show_frame(const StackFrame& frame) -> void;
 
         Window* m_window = nullptr;
@@ -75,12 +80,18 @@ namespace Hsdbg
         std::vector<std::string> m_console_lines;
         std::string m_console_input;
         std::string m_target_input;
+        std::string m_symbol_filter;
 
         uint64_t m_followed_stop = 0;
+        std::filesystem::path m_followed_target;
 
         bool m_layout_built = false;
         bool m_console_scroll_pending = false;
         bool m_load_target_pending = false;
         bool m_focus_breakpoints = false;
+        bool m_focus_symbols = false;
+        bool m_focus_disassembly = false;
+        bool m_scroll_to_program_counter = false;
+        bool m_scroll_to_symbol = false;
     };
 }

@@ -12,9 +12,11 @@
 #include <backends/imgui_impl_opengl3.h>
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <format>
 #include <span>
+#include <vector>
 
 namespace Hsdbg
 {
@@ -26,6 +28,8 @@ namespace Hsdbg
         constexpr const char* PANEL_THREADS = "threads";
         constexpr const char* PANEL_LOCALS = "locals";
         constexpr const char* PANEL_REGISTERS = "registers";
+        constexpr const char* PANEL_SYMBOLS = "symbols";
+        constexpr const char* PANEL_DISASSEMBLY = "disassembly";
         constexpr const char* PANEL_CONSOLE = "console";
 
         constexpr const char* LOAD_TARGET_POPUP = "load target";
@@ -39,6 +43,169 @@ namespace Hsdbg
         // breathing room between the window edge and everything docked inside it
         const ImVec2 ROOT_PADDING(8.0f, 6.0f);
         const ImVec2 TOOLBAR_PADDING(4.0f, 4.0f);
+
+        // the same green the source view puts behind the current line
+        const ImU32 CURRENT_INSTRUCTION_COLOR = IM_COL32(58, 72, 46, 255);
+
+        constexpr float BREAKPOINT_RADIUS = 5.0f;
+        constexpr float DISASSEMBLY_GUTTER_WIDTH = 22.0f;
+
+        const ImU32 BREAKPOINT_COLOR = IM_COL32(226, 84, 84, 255);
+        const ImU32 BREAKPOINT_DISABLED_COLOR = IM_COL32(120, 90, 90, 255);
+        const ImU32 BREAKPOINT_HOVER_COLOR = IM_COL32(226, 84, 84, 90);
+
+        auto breakpoint_at(Debugger& debugger, const Instruction& instruction) -> const Breakpoint*
+        {
+            for (const Breakpoint& candidate : debugger.breakpoints())
+            {
+                if (instruction.file_address != 0 &&
+                    candidate.file_address == instruction.file_address)
+                {
+                    return &candidate;
+                }
+
+                if (candidate.address != 0 && candidate.address == instruction.address)
+                    return &candidate;
+            }
+
+            return nullptr;
+        }
+
+        auto toggle_instruction_breakpoint(Debugger& debugger, const Instruction& instruction) -> void
+        {
+            if (const Breakpoint* existing = breakpoint_at(debugger, instruction); existing != nullptr)
+            {
+                debugger.remove_breakpoint(existing->id);
+                return;
+            }
+
+            if (instruction.file_address != 0)
+                debugger.add_address_breakpoint(instruction.file_address);
+        }
+
+        auto matches_filter(std::string_view name, std::string_view filter) -> bool
+        {
+            if (filter.empty())
+                return true;
+
+            if (filter.size() > name.size())
+                return false;
+
+            const auto equal = [](char left, char right)
+            {
+                return std::tolower(static_cast<unsigned char>(left)) ==
+                       std::tolower(static_cast<unsigned char>(right));
+            };
+
+            return std::ranges::search(name, filter, equal).begin() != name.end();
+        }
+
+        auto draw_instruction_table(Debugger& debugger,
+                                    std::span<const Instruction> instructions,
+                                    bool scroll_to_current) -> void
+        {
+            constexpr ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                              ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
+                                              ImGuiTableFlags_NoPadOuterX;
+
+            if (!ImGui::BeginTable("##instructions", 5, flags, ImVec2(0.0f, 0.0f)))
+                return;
+
+            ImGui::TableSetupColumn("##gutter",
+                                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize,
+                                    DISASSEMBLY_GUTTER_WIDTH);
+            ImGui::TableSetupColumn("address", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+            ImGui::TableSetupColumn("mnemonic", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+            ImGui::TableSetupColumn("operands");
+            ImGui::TableSetupColumn("comment");
+            ImGui::TableHeadersRow();
+
+            const float row_height = ImGui::GetTextLineHeightWithSpacing();
+
+            if (scroll_to_current)
+            {
+                int scroll_index = 0;
+
+                for (int index = 0; index < static_cast<int>(instructions.size()); ++index)
+                {
+                    if (instructions[static_cast<size_t>(index)].current)
+                    {
+                        scroll_index = index;
+                        break;
+                    }
+                }
+
+                ImGui::SetScrollY(static_cast<float>(scroll_index) * row_height -
+                                  ImGui::GetWindowHeight() * 0.35f);
+            }
+
+            ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(instructions.size()), row_height);
+
+            while (clipper.Step())
+            {
+                for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index)
+                {
+                    const Instruction& instruction = instructions[static_cast<size_t>(index)];
+                    const Breakpoint* breakpoint = breakpoint_at(debugger, instruction);
+
+                    ImGui::TableNextRow();
+                    ImGui::PushID(index);
+
+                    if (instruction.current)
+                    {
+                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, CURRENT_INSTRUCTION_COLOR);
+                    }
+
+                    ImGui::TableNextColumn();
+
+                    const ImVec2 gutter_min = ImGui::GetCursorScreenPos();
+
+                    if (ImGui::InvisibleButton("##gutter", ImVec2(DISASSEMBLY_GUTTER_WIDTH, row_height)))
+                        toggle_instruction_breakpoint(debugger, instruction);
+
+                    const bool gutter_hovered = ImGui::IsItemHovered();
+                    const ImVec2 marker_center(gutter_min.x + DISASSEMBLY_GUTTER_WIDTH * 0.5f,
+                                               gutter_min.y + row_height * 0.5f);
+
+                    if (breakpoint != nullptr)
+                    {
+                        const ImU32 color = breakpoint->enabled ? BREAKPOINT_COLOR
+                                                                : BREAKPOINT_DISABLED_COLOR;
+
+                        if (breakpoint->resolved)
+                            draw_list->AddCircleFilled(marker_center, BREAKPOINT_RADIUS, color);
+                        else
+                            draw_list->AddCircle(marker_center, BREAKPOINT_RADIUS, color, 0, 1.5f);
+                    }
+                    else if (gutter_hovered)
+                    {
+                        draw_list->AddCircleFilled(marker_center, BREAKPOINT_RADIUS, BREAKPOINT_HOVER_COLOR);
+                    }
+
+                    ImGui::TableNextColumn();
+                    ImGui::Text("0x%012llx", static_cast<unsigned long long>(instruction.address));
+
+                    if (scroll_to_current && instruction.current)
+                        ImGui::SetScrollHereY(0.35f);
+
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(instruction.mnemonic.c_str());
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(instruction.operands.c_str());
+                    ImGui::TableNextColumn();
+
+                    if (!instruction.comment.empty())
+                        ImGui::TextDisabled("; %s", instruction.comment.c_str());
+
+                    ImGui::PopID();
+                }
+            }
+
+            ImGui::EndTable();
+        }
 
         auto state_color(TargetState state) -> ImVec4
         {
@@ -154,6 +321,10 @@ namespace Hsdbg
 
         m_followed_stop = debugger.stop_count();
 
+        // wanted even when no frame has source to show
+        m_scroll_to_program_counter = true;
+        m_scroll_to_symbol = true;
+
         const std::span<const StackFrame> stack = debugger.call_stack();
 
         // the innermost frames are often runtime internals with no source, and
@@ -168,6 +339,23 @@ namespace Hsdbg
 
         debugger.select_frame(frame->index);
         show_frame(*frame);
+    }
+
+    auto Ui::follow_target(Debugger& debugger) -> void
+    {
+        if (!debugger.has_target())
+        {
+            m_followed_target.clear();
+            return;
+        }
+
+        if (debugger.target_path() == m_followed_target)
+            return;
+
+        m_followed_target = debugger.target_path();
+        m_focus_symbols = true;
+        m_scroll_to_symbol = true;
+        m_scroll_to_program_counter = true;
     }
 
     auto Ui::show_frame(const StackFrame& frame) -> void
@@ -206,6 +394,7 @@ namespace Hsdbg
         draw_toolbar(debugger);
 
         follow_stop(debugger);
+        follow_target(debugger);
 
         const ImGuiID dockspace_id = ImGui::GetID("##hsdbg_dockspace");
         const float status_bar_height = ImGui::GetTextLineHeight() +
@@ -235,6 +424,8 @@ namespace Hsdbg
         draw_threads_panel(debugger);
         draw_locals_panel(debugger);
         draw_registers_panel(debugger);
+        draw_symbols_panel(debugger);
+        draw_disassembly_panel(debugger);
         draw_console_panel(debugger);
 
         if (m_visible.demo)
@@ -242,7 +433,19 @@ namespace Hsdbg
 
         // a window claims its tab when it is first submitted, so this can only be
         // asked for once every panel in the node exists
-        if (m_focus_breakpoints)
+        if (m_focus_symbols)
+        {
+            ImGui::SetWindowFocus(PANEL_SYMBOLS);
+            m_focus_symbols = false;
+            m_focus_breakpoints = false;
+        }
+        else if (m_focus_disassembly)
+        {
+            ImGui::SetWindowFocus(PANEL_DISASSEMBLY);
+            m_focus_disassembly = false;
+            m_focus_breakpoints = false;
+        }
+        else if (m_focus_breakpoints)
         {
             ImGui::SetWindowFocus(PANEL_BREAKPOINTS);
             m_focus_breakpoints = false;
@@ -267,7 +470,9 @@ namespace Hsdbg
         const ImGuiID right_bottom_id = ImGui::DockBuilderSplitNode(right_top_id, ImGuiDir_Down, 0.5f, nullptr, &right_top_id);
 
         ImGui::DockBuilderDockWindow(PANEL_SOURCE, center_id);
+        ImGui::DockBuilderDockWindow(PANEL_DISASSEMBLY, center_id);
         ImGui::DockBuilderDockWindow(PANEL_THREADS, left_top_id);
+        ImGui::DockBuilderDockWindow(PANEL_SYMBOLS, left_bottom_id);
         ImGui::DockBuilderDockWindow(PANEL_CALL_STACK, left_bottom_id);
         ImGui::DockBuilderDockWindow(PANEL_LOCALS, right_top_id);
         ImGui::DockBuilderDockWindow(PANEL_REGISTERS, right_bottom_id);
@@ -343,6 +548,8 @@ namespace Hsdbg
             ImGui::MenuItem(PANEL_THREADS, nullptr, &m_visible.threads);
             ImGui::MenuItem(PANEL_LOCALS, nullptr, &m_visible.locals);
             ImGui::MenuItem(PANEL_REGISTERS, nullptr, &m_visible.registers);
+            ImGui::MenuItem(PANEL_SYMBOLS, nullptr, &m_visible.symbols);
+            ImGui::MenuItem(PANEL_DISASSEMBLY, nullptr, &m_visible.disassembly);
             ImGui::MenuItem(PANEL_CONSOLE, nullptr, &m_visible.console);
 
             ImGui::Separator();
@@ -515,7 +722,7 @@ namespace Hsdbg
         {
             if (debugger.breakpoints().empty())
             {
-                ImGui::TextDisabled("no breakpoints, click a line gutter in the source panel");
+                ImGui::TextDisabled("no breakpoints, click a gutter in source or disassembly");
             }
             else
             {
@@ -552,7 +759,12 @@ namespace Hsdbg
                         ImGui::Text("%u", breakpoint.id);
 
                         ImGui::TableNextColumn();
-                        if (breakpoint.line != 0)
+                        if (breakpoint.by_address)
+                        {
+                            ImGui::Text("0x%llx",
+                                        static_cast<unsigned long long>(breakpoint.file_address));
+                        }
+                        else if (breakpoint.line != 0)
                         {
                             ImGui::Text("%s:%u",
                                         breakpoint.file.filename().string().c_str(),
@@ -647,6 +859,9 @@ namespace Hsdbg
                     {
                         debugger.select_frame(frame.index);
                         show_frame(frame);
+
+                        m_scroll_to_program_counter = true;
+                        m_scroll_to_symbol = true;
                     }
 
                     if (frame.line == 0)
@@ -680,7 +895,11 @@ namespace Hsdbg
                     const std::string label = std::format("{}  {}", thread.id, thread.name);
 
                     if (ImGui::Selectable(label.c_str(), selected))
+                    {
                         debugger.select_thread(thread.id);
+
+                        m_scroll_to_program_counter = true;
+                    }
 
                     ImGui::SameLine();
                     ImGui::TextDisabled("%s", to_string(thread.stop_reason).data());
@@ -760,6 +979,131 @@ namespace Hsdbg
 
                     ImGui::EndTable();
                 }
+            }
+        }
+
+        ImGui::End();
+    }
+
+    auto Ui::draw_symbols_panel(Debugger& debugger) -> void
+    {
+        if (!m_visible.symbols)
+            return;
+
+        if (ImGui::Begin(PANEL_SYMBOLS, &m_visible.symbols))
+        {
+            const std::span<const Symbol> symbols = debugger.symbols();
+
+            if (symbols.empty())
+            {
+                ImGui::TextDisabled("no symbols");
+            }
+            else
+            {
+                ImGui::SetNextItemWidth(-1.0f);
+                ImGui::InputTextWithHint("##symbol_filter", "filter symbols", &m_symbol_filter);
+
+                std::vector<size_t> visible;
+
+                for (size_t index = 0; index < symbols.size(); ++index)
+                {
+                    if (matches_filter(symbols[index].name, m_symbol_filter))
+                        visible.push_back(index);
+                }
+
+                ImGui::TextDisabled("%zu / %zu", visible.size(), symbols.size());
+
+                constexpr ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                                  ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
+                                                  ImGuiTableFlags_NoPadOuterX;
+
+                if (ImGui::BeginTable("##symbols", 2, flags))
+                {
+                    ImGui::TableSetupColumn("address", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+                    ImGui::TableSetupColumn("name");
+                    ImGui::TableSetupScrollFreeze(0, 1);
+                    ImGui::TableHeadersRow();
+
+                    const float row_height = ImGui::GetTextLineHeightWithSpacing();
+
+                    if (m_scroll_to_symbol)
+                    {
+                        for (int index = 0; index < static_cast<int>(visible.size()); ++index)
+                        {
+                            if (symbols[visible[static_cast<size_t>(index)]].file_address ==
+                                debugger.selected_symbol())
+                            {
+                                ImGui::SetScrollY(static_cast<float>(index) * row_height -
+                                                  ImGui::GetWindowHeight() * 0.35f);
+                                break;
+                            }
+                        }
+
+                        m_scroll_to_symbol = false;
+                    }
+
+                    ImGuiListClipper clipper;
+                    clipper.Begin(static_cast<int>(visible.size()), row_height);
+
+                    while (clipper.Step())
+                    {
+                        for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index)
+                        {
+                            const Symbol& symbol = symbols[visible[static_cast<size_t>(index)]];
+                            const bool selected = symbol.file_address == debugger.selected_symbol();
+
+                            ImGui::TableNextRow();
+                            ImGui::TableNextColumn();
+
+                            ImGui::PushID(static_cast<int>(symbol.file_address));
+
+                            if (ImGui::Selectable(std::format("0x{:012x}", symbol.address).c_str(),
+                                                  selected,
+                                                  ImGuiSelectableFlags_SpanAllColumns))
+                            {
+                                debugger.select_symbol(symbol.file_address);
+                                m_focus_disassembly = true;
+                                m_scroll_to_program_counter = true;
+                            }
+
+                            if (ImGui::IsItemHovered() && symbol.name.size() > 40)
+                                ImGui::SetTooltip("%s", symbol.name.c_str());
+
+                            ImGui::TableNextColumn();
+                            ImGui::TextUnformatted(symbol.name.c_str());
+
+                            ImGui::PopID();
+                        }
+                    }
+
+                    ImGui::EndTable();
+                }
+            }
+        }
+
+        ImGui::End();
+    }
+
+    auto Ui::draw_disassembly_panel(Debugger& debugger) -> void
+    {
+        if (!m_visible.disassembly)
+            return;
+
+        if (ImGui::Begin(PANEL_DISASSEMBLY, &m_visible.disassembly))
+        {
+            const std::span<const Instruction> instructions = debugger.disassembly();
+
+            if (instructions.empty())
+            {
+                ImGui::TextDisabled("no disassembly");
+            }
+            else
+            {
+                if (!debugger.disassembly_name().empty())
+                    ImGui::TextUnformatted(debugger.disassembly_name().data());
+
+                draw_instruction_table(debugger, instructions, m_scroll_to_program_counter);
+                m_scroll_to_program_counter = false;
             }
         }
 

@@ -96,6 +96,11 @@ namespace Hsdbg
         // set by name, so file and line are whatever lldb found rather than
         // what was asked for
         bool by_function = false;
+
+        // set on an instruction, identified by where it sits in the binary so it
+        // survives the process being restarted somewhere else
+        bool by_address = false;
+        uint64_t file_address = 0;
     };
 
     struct StackFrame
@@ -126,5 +131,31 @@ namespace Hsdbg
     {
         std::string name;
         uint64_t value = 0;
+    };
+
+    struct Instruction
+    {
+        // where the instruction is right now, which is the load address once a
+        // process is running and the address in the binary before that
+        uint64_t address = 0;
+
+        // the same instruction across runs, so a breakpoint can point at it
+        uint64_t file_address = 0;
+
+        std::string mnemonic;
+        std::string operands;
+        std::string comment;
+        uint32_t size = 0;
+
+        // whether the selected frame is sitting on this one
+        bool current = false;
+    };
+
+    struct Symbol
+    {
+        std::string name;
+        uint64_t file_address = 0;
+        uint64_t address = 0;
+        uint64_t size = 0;
     };
 }
