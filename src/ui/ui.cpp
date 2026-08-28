@@ -11,8 +11,10 @@
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <format>
+#include <span>
 
 namespace Hsdbg
 {
@@ -137,6 +139,48 @@ namespace Hsdbg
         }
     }
 
+    auto Ui::follow_stop(Debugger& debugger) -> void
+    {
+        if (!debugger.is_stopped())
+        {
+            if (debugger.is_running())
+                m_source_view.set_highlighted_line(0);
+
+            return;
+        }
+
+        if (debugger.stop_count() == m_followed_stop)
+            return;
+
+        m_followed_stop = debugger.stop_count();
+
+        const std::span<const StackFrame> stack = debugger.call_stack();
+
+        // the innermost frames are often runtime internals with no source, and
+        // pointing at them tells the user nothing
+        const auto frame = std::ranges::find_if(stack, [](const StackFrame& candidate)
+        {
+            return candidate.line != 0 && !candidate.file.empty();
+        });
+
+        if (frame == stack.end())
+            return;
+
+        debugger.select_frame(frame->index);
+        show_frame(*frame);
+    }
+
+    auto Ui::show_frame(const StackFrame& frame) -> void
+    {
+        if (frame.file.empty() || frame.line == 0)
+            return;
+
+        if (m_source_view.path() != frame.file)
+            open_source(frame.file);
+
+        m_source_view.set_highlighted_line(frame.line);
+    }
+
     auto Ui::draw(Debugger& debugger) -> void
     {
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -160,6 +204,8 @@ namespace Hsdbg
 
         draw_menu_bar(debugger);
         draw_toolbar(debugger);
+
+        follow_stop(debugger);
 
         const ImGuiID dockspace_id = ImGui::GetID("##hsdbg_dockspace");
         const float status_bar_height = ImGui::GetTextLineHeight() +
@@ -571,7 +617,10 @@ namespace Hsdbg
                     const std::string label = std::format("{:>2}  {}", frame.index, frame.function);
 
                     if (ImGui::Selectable(label.c_str(), selected))
+                    {
                         debugger.select_frame(frame.index);
+                        show_frame(frame);
+                    }
 
                     if (frame.line == 0)
                         continue;

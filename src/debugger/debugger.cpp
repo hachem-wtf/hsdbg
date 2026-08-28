@@ -6,6 +6,7 @@
 #include <lldb/API/LLDB.h>
 
 #include <algorithm>
+#include <array>
 #include <source_location>
 
 // no standard way to read or write the environment
@@ -76,6 +77,19 @@ namespace Hsdbg
             Log::warn("debugger: no debug server found, launching a target will fail");
         }
 
+        auto path_of(lldb::SBFileSpec spec) -> std::filesystem::path
+        {
+            if (!spec.IsValid())
+                return {};
+
+            std::array<char, 1024> buffer{};
+
+            if (spec.GetPath(buffer.data(), buffer.size()) == 0)
+                return {};
+
+            return std::filesystem::path(buffer.data());
+        }
+
         auto read_back(lldb::SBTarget& target, lldb::SBBreakpoint& source, Breakpoint& breakpoint) -> void
         {
             breakpoint.enabled = source.IsEnabled();
@@ -107,8 +121,13 @@ namespace Hsdbg
 
             lldb::SBLineEntry line_entry = context.GetLineEntry();
 
-            if (breakpoint.line != 0 && line_entry.IsValid())
-                breakpoint.line = line_entry.GetLine();
+            if (!line_entry.IsValid())
+                return;
+
+            breakpoint.line = line_entry.GetLine();
+
+            if (breakpoint.by_function)
+                breakpoint.file = path_of(line_entry.GetFileSpec());
         }
 
         // every call site reports itself, so the stubs stay one line each until
@@ -119,12 +138,65 @@ namespace Hsdbg
             Log::warn("{} is not implemented yet", location.function_name());
             return fail("{} is not implemented yet", location.function_name());
         }
+
+        auto is_alive(lldb::SBProcess& process) -> bool
+        {
+            if (!process.IsValid())
+                return false;
+
+            switch (process.GetState())
+            {
+                case lldb::eStateInvalid:
+                case lldb::eStateUnloaded:
+                case lldb::eStateDetached:
+                case lldb::eStateExited:
+                    return false;
+                default:
+                    return true;
+            }
+        }
+
+        auto to_stop_reason(lldb::StopReason reason) -> StopReason
+        {
+            switch (reason)
+            {
+                case lldb::eStopReasonBreakpoint:   return StopReason::Breakpoint;
+                case lldb::eStopReasonPlanComplete: return StopReason::Step;
+                case lldb::eStopReasonSignal:       return StopReason::Signal;
+                case lldb::eStopReasonException:    return StopReason::Exception;
+                case lldb::eStopReasonWatchpoint:   return StopReason::Watchpoint;
+                default:                            return StopReason::None;
+            }
+        }
+
+        auto message_of(const lldb::SBError& error, const char* fallback) -> const char*
+        {
+            const char* message = error.GetCString();
+
+            return message != nullptr && message[0] != '\0' ? message : fallback;
+        }
+
+        auto name_of(lldb::SBFrame& frame) -> std::string
+        {
+            if (const char* display = frame.GetDisplayFunctionName(); display != nullptr)
+                return display;
+
+            if (const char* name = frame.GetFunctionName(); name != nullptr)
+                return name;
+
+            return "??";
+        }
     }
 
     struct Debugger::Session
     {
         lldb::SBDebugger debugger;
         lldb::SBTarget target;
+        lldb::SBProcess process;
+        lldb::SBListener listener;
+
+        // process output arrives in chunks that do not respect line endings
+        std::string partial_output;
     };
 
     Debugger::Debugger()
@@ -138,6 +210,9 @@ namespace Hsdbg
         m_session->debugger.SetAsync(true);
 
         HSDBG_ASSERT(m_session->debugger.IsValid(), "failed to create the lldb debugger");
+
+        // async means lldb reports everything through here instead of blocking
+        m_session->listener = lldb::SBListener("hsdbg");
 
         Log::info("debugger: {}", lldb::SBDebugger::GetVersionString());
     }
@@ -210,6 +285,12 @@ namespace Hsdbg
 
     auto Debugger::unload_target() -> void
     {
+        if (is_alive(m_session->process))
+            m_session->process.Kill();
+
+        m_session->process = lldb::SBProcess();
+        m_session->partial_output.clear();
+
         m_target_path.clear();
         m_process_id = 0;
         m_stop_reason = StopReason::None;
@@ -229,6 +310,14 @@ namespace Hsdbg
             breakpoint.resolved = false;
             breakpoint.hit_count = 0;
             breakpoint.address = 0;
+
+            // whatever lldb told us about a named breakpoint belonged to the
+            // binary that just went away
+            if (breakpoint.by_function)
+            {
+                breakpoint.file.clear();
+                breakpoint.line = 0;
+            }
         }
 
         if (m_session->target.IsValid())
@@ -243,58 +332,276 @@ namespace Hsdbg
 
     auto Debugger::launch(const LaunchSpec& spec) -> Result<void>
     {
-        (void)spec;
-        return not_implemented();
+        if (!m_session->target.IsValid())
+            return fail("no target loaded");
+
+        if (is_alive(m_session->process))
+            return fail("'{}' is already running", m_target_path.filename().string());
+
+        std::vector<const char*> arguments;
+        arguments.reserve(spec.arguments.size() + 1);
+
+        for (const std::string& argument : spec.arguments)
+            arguments.push_back(argument.c_str());
+
+        arguments.push_back(nullptr);
+
+        lldb::SBLaunchInfo info(arguments.data());
+        info.SetListener(m_session->listener);
+
+        if (!spec.environment.empty())
+        {
+            std::vector<const char*> environment;
+            environment.reserve(spec.environment.size() + 1);
+
+            for (const std::string& entry : spec.environment)
+                environment.push_back(entry.c_str());
+
+            environment.push_back(nullptr);
+
+            info.SetEnvironmentEntries(environment.data(), true);
+        }
+
+        if (!spec.working_directory.empty())
+            info.SetWorkingDirectory(spec.working_directory.string().c_str());
+
+        if (spec.stop_at_entry)
+            info.SetLaunchFlags(info.GetLaunchFlags() | lldb::eLaunchFlagStopAtEntry);
+
+        set_state(TargetState::Launching);
+
+        lldb::SBError error;
+        lldb::SBProcess process = m_session->target.Launch(info, error);
+
+        if (error.Fail() || !process.IsValid())
+        {
+            set_state(TargetState::Loaded);
+
+            return fail("could not launch '{}': {}",
+                        m_target_path.filename().string(),
+                        message_of(error, "unknown error"));
+        }
+
+        m_session->process = process;
+        m_process_id = process.GetProcessID();
+        m_stop_reason = StopReason::None;
+
+        Log::info("debugger: launched '{}' as pid {}",
+                  m_target_path.filename().string(),
+                  m_process_id);
+
+        // a launch that runs on is briefly stopped here before lldb lets it go,
+        // and reporting that would show the user a stop that never happened
+        if (spec.stop_at_entry)
+            sync_after_start();
+        else
+            set_state(TargetState::Running);
+
+        return {};
     }
 
     auto Debugger::attach(uint64_t process_id) -> Result<void>
     {
-        (void)process_id;
-        return not_implemented();
+        if (is_alive(m_session->process))
+            return fail("already attached to pid {}", m_process_id);
+
+        // attaching needs no binary on disk, lldb reads it back off the process
+        if (!m_session->target.IsValid())
+        {
+            m_session->target = m_session->debugger.CreateTarget("");
+
+            if (!m_session->target.IsValid())
+                return fail("could not create a target to attach with");
+        }
+
+        lldb::SBAttachInfo info(static_cast<lldb::pid_t>(process_id));
+        info.SetListener(m_session->listener);
+
+        set_state(TargetState::Launching);
+
+        lldb::SBError error;
+        lldb::SBProcess process = m_session->target.Attach(info, error);
+
+        if (error.Fail() || !process.IsValid())
+        {
+            set_state(m_target_path.empty() ? TargetState::NoTarget : TargetState::Loaded);
+
+            return fail("could not attach to pid {}: {}",
+                        process_id,
+                        message_of(error, "unknown error"));
+        }
+
+        m_session->process = process;
+        m_process_id = process.GetProcessID();
+
+        if (m_target_path.empty())
+            m_target_path = path_of(m_session->target.GetExecutable());
+
+        for (Breakpoint& breakpoint : m_breakpoints)
+        {
+            if (breakpoint.backend_id == 0)
+                resolve_breakpoint(breakpoint);
+        }
+
+        Log::info("debugger: attached to pid {}", m_process_id);
+
+        sync_after_start();
+
+        return {};
     }
 
     auto Debugger::detach() -> Result<void>
     {
-        return not_implemented();
+        if (!is_alive(m_session->process))
+            return fail("nothing to detach from");
+
+        const lldb::SBError error = m_session->process.Detach();
+
+        if (error.Fail())
+            return fail("could not detach: {}", message_of(error, "unknown error"));
+
+        Log::info("debugger: detached from pid {}", m_process_id);
+
+        return {};
     }
 
     auto Debugger::terminate() -> Result<void>
     {
-        return not_implemented();
+        if (!is_alive(m_session->process))
+            return fail("nothing to stop");
+
+        const lldb::SBError error = m_session->process.Kill();
+
+        if (error.Fail())
+            return fail("could not stop pid {}: {}", m_process_id, message_of(error, "unknown error"));
+
+        return {};
     }
 
     auto Debugger::resume() -> Result<void>
     {
-        return not_implemented();
+        if (!is_alive(m_session->process))
+            return fail("no running process");
+
+        if (m_session->process.GetState() == lldb::eStateRunning)
+            return fail("already running");
+
+        const lldb::SBError error = m_session->process.Continue();
+
+        if (error.Fail())
+            return fail("could not continue: {}", message_of(error, "unknown error"));
+
+        return {};
     }
 
     auto Debugger::pause() -> Result<void>
     {
-        return not_implemented();
+        if (!is_alive(m_session->process))
+            return fail("no running process");
+
+        if (m_session->process.GetState() == lldb::eStateStopped)
+            return fail("already stopped");
+
+        const lldb::SBError error = m_session->process.Stop();
+
+        if (error.Fail())
+            return fail("could not pause: {}", message_of(error, "unknown error"));
+
+        return {};
     }
 
     auto Debugger::step_over(StepMode mode) -> Result<void>
     {
-        (void)mode;
-        return not_implemented();
+        if (const Result<void> ready = require_stopped(); !ready)
+            return ready;
+
+        lldb::SBThread thread = m_session->process.GetSelectedThread();
+
+        if (!thread.IsValid())
+            return fail("no thread selected");
+
+        lldb::SBError error;
+
+        if (mode == StepMode::Instruction)
+            thread.StepInstruction(true, error);
+        else
+            thread.StepOver(lldb::eOnlyDuringStepping, error);
+
+        if (error.Fail())
+            return fail("could not step over: {}", message_of(error, "unknown error"));
+
+        return {};
     }
 
     auto Debugger::step_into(StepMode mode) -> Result<void>
     {
-        (void)mode;
-        return not_implemented();
+        if (const Result<void> ready = require_stopped(); !ready)
+            return ready;
+
+        lldb::SBThread thread = m_session->process.GetSelectedThread();
+
+        if (!thread.IsValid())
+            return fail("no thread selected");
+
+        lldb::SBError error;
+
+        if (mode == StepMode::Instruction)
+            thread.StepInstruction(false, error);
+        else
+            thread.StepInto(nullptr, LLDB_INVALID_LINE_NUMBER, error, lldb::eOnlyDuringStepping);
+
+        if (error.Fail())
+            return fail("could not step into: {}", message_of(error, "unknown error"));
+
+        return {};
     }
 
     auto Debugger::step_out() -> Result<void>
     {
-        return not_implemented();
+        if (const Result<void> ready = require_stopped(); !ready)
+            return ready;
+
+        lldb::SBThread thread = m_session->process.GetSelectedThread();
+
+        if (!thread.IsValid())
+            return fail("no thread selected");
+
+        lldb::SBError error;
+        thread.StepOut(error);
+
+        if (error.Fail())
+            return fail("could not step out: {}", message_of(error, "unknown error"));
+
+        return {};
     }
 
     auto Debugger::run_to(const std::filesystem::path& file, uint32_t line) -> Result<void>
     {
-        (void)file;
-        (void)line;
-        return not_implemented();
+        if (const Result<void> ready = require_stopped(); !ready)
+            return ready;
+
+        lldb::SBThread thread = m_session->process.GetSelectedThread();
+
+        if (!thread.IsValid())
+            return fail("no thread selected");
+
+        lldb::SBFrame frame = thread.GetFrameAtIndex(m_selected_frame);
+
+        if (!frame.IsValid())
+            return fail("no frame selected");
+
+        lldb::SBFileSpec spec(file.filename().string().c_str());
+        const lldb::SBError error = thread.StepOverUntil(frame, spec, line);
+
+        if (error.Fail())
+        {
+            return fail("could not run to {}:{}: {}",
+                        file.filename().string(),
+                        line,
+                        message_of(error, "unknown error"));
+        }
+
+        return {};
     }
 
     auto Debugger::add_breakpoint(const std::filesystem::path& file, uint32_t line) -> uint32_t
@@ -327,7 +634,7 @@ namespace Hsdbg
     {
         const auto existing = std::ranges::find_if(m_breakpoints, [&](const Breakpoint& candidate)
         {
-            return candidate.function == function && candidate.line == 0;
+            return candidate.by_function && candidate.function == function;
         });
 
         if (existing != m_breakpoints.end())
@@ -336,6 +643,7 @@ namespace Hsdbg
         Breakpoint breakpoint;
         breakpoint.id = m_next_breakpoint_id++;
         breakpoint.function = function;
+        breakpoint.by_function = true;
 
         m_breakpoints.push_back(std::move(breakpoint));
         resolve_breakpoint(m_breakpoints.back());
@@ -416,6 +724,12 @@ namespace Hsdbg
 
         m_selected_thread = thread_id;
         m_selected_frame = 0;
+        m_stop_reason = entry->stop_reason;
+
+        if (is_alive(m_session->process))
+            m_session->process.SetSelectedThreadByID(m_selected_thread);
+
+        refresh_call_stack();
 
         return true;
     }
@@ -427,12 +741,269 @@ namespace Hsdbg
 
         m_selected_frame = frame_index;
 
+        if (is_alive(m_session->process))
+        {
+            lldb::SBThread thread = m_session->process.GetThreadByID(m_selected_thread);
+
+            if (thread.IsValid())
+                thread.SetSelectedFrame(frame_index);
+        }
+
         return true;
     }
 
     auto Debugger::update() -> void
     {
+        pump_events();
         sync_breakpoints();
+    }
+
+    auto Debugger::require_stopped() const -> Result<void>
+    {
+        if (!is_alive(m_session->process))
+            return fail("no running process");
+
+        if (m_session->process.GetState() != lldb::eStateStopped)
+            return fail("the process is not stopped");
+
+        return {};
+    }
+
+    // lldb settles the process before launch or attach returns and keeps that
+    // first stop to itself, so there is no event coming for it
+    auto Debugger::sync_after_start() -> void
+    {
+        if (!is_alive(m_session->process))
+            return;
+
+        if (m_session->process.GetState() == lldb::eStateStopped)
+            on_stopped();
+        else
+            set_state(TargetState::Running);
+    }
+
+    auto Debugger::pump_events() -> void
+    {
+        if (!m_session->listener.IsValid())
+            return;
+
+        lldb::SBEvent event;
+
+        while (m_session->listener.GetNextEvent(event))
+        {
+            if (!lldb::SBProcess::EventIsProcessEvent(event))
+                continue;
+
+            const uint32_t type = event.GetType();
+
+            if ((type & (lldb::SBProcess::eBroadcastBitSTDOUT |
+                         lldb::SBProcess::eBroadcastBitSTDERR)) != 0)
+            {
+                drain_output();
+            }
+
+            if ((type & lldb::SBProcess::eBroadcastBitStateChanged) == 0)
+                continue;
+
+            // lldb reports a stop it is about to undo, following it would show
+            // the user a location the process never really sat at
+            if (lldb::SBProcess::GetRestartedFromEvent(event))
+                continue;
+
+            switch (lldb::SBProcess::GetStateFromEvent(event))
+            {
+                case lldb::eStateRunning:
+                case lldb::eStateStepping:
+                    set_state(TargetState::Running);
+                    break;
+
+                // a real stop is always announced as running first, so anything
+                // else is lldb repeating one that was already handled
+                case lldb::eStateStopped:
+                    if (m_state != TargetState::Stopped)
+                        on_stopped();
+
+                    break;
+
+                case lldb::eStateCrashed:
+                    on_stopped();
+                    set_state(TargetState::Crashed);
+                    break;
+
+                case lldb::eStateExited:
+                    on_exited();
+                    break;
+
+                case lldb::eStateDetached:
+                    drain_output();
+                    m_session->process = lldb::SBProcess();
+                    m_process_id = 0;
+                    m_threads.clear();
+                    m_call_stack.clear();
+                    set_state(m_session->target.IsValid() ? TargetState::Loaded
+                                                          : TargetState::NoTarget);
+                    break;
+
+                default:
+                    break;
+            }
+        }
+    }
+
+    auto Debugger::drain_output() -> void
+    {
+        if (!m_session->process.IsValid())
+            return;
+
+        std::array<char, 1024> buffer{};
+
+        while (const size_t read = m_session->process.GetSTDOUT(buffer.data(), buffer.size()))
+            m_session->partial_output.append(buffer.data(), read);
+
+        while (const size_t read = m_session->process.GetSTDERR(buffer.data(), buffer.size()))
+            m_session->partial_output.append(buffer.data(), read);
+
+        size_t start = 0;
+
+        for (size_t end = m_session->partial_output.find('\n', start);
+             end != std::string::npos;
+             end = m_session->partial_output.find('\n', start))
+        {
+            m_console_output.emplace_back(m_session->partial_output, start, end - start);
+            start = end + 1;
+        }
+
+        m_session->partial_output.erase(0, start);
+    }
+
+    auto Debugger::on_stopped() -> void
+    {
+        drain_output();
+
+        m_threads.clear();
+
+        const uint32_t count = m_session->process.GetNumThreads();
+
+        for (uint32_t index = 0; index < count; ++index)
+        {
+            lldb::SBThread source = m_session->process.GetThreadAtIndex(index);
+
+            if (!source.IsValid())
+                continue;
+
+            Thread thread;
+            thread.id = source.GetThreadID();
+            thread.stop_reason = to_stop_reason(source.GetStopReason());
+
+            if (const char* name = source.GetName(); name != nullptr)
+                thread.name = name;
+            else if (const char* queue = source.GetQueueName(); queue != nullptr)
+                thread.name = queue;
+
+            m_threads.push_back(std::move(thread));
+        }
+
+        lldb::SBThread selected = m_session->process.GetSelectedThread();
+
+        // lldb picks the thread that caused the stop, which is the one the user
+        // wants to look at unless they already chose another that is still alive
+        const bool keep_selection = std::ranges::any_of(m_threads, [&](const Thread& thread)
+        {
+            return thread.id == m_selected_thread && thread.stop_reason != StopReason::None;
+        });
+
+        if (!keep_selection && selected.IsValid())
+            m_selected_thread = selected.GetThreadID();
+        else if (keep_selection)
+            m_session->process.SetSelectedThreadByID(m_selected_thread);
+
+        m_stop_reason = StopReason::None;
+
+        if (const auto entry = std::ranges::find(m_threads, m_selected_thread, &Thread::id);
+            entry != m_threads.end())
+        {
+            m_stop_reason = entry->stop_reason;
+        }
+
+        m_selected_frame = 0;
+        refresh_call_stack();
+
+        set_state(TargetState::Stopped);
+
+        ++m_stop_count;
+    }
+
+    auto Debugger::on_exited() -> void
+    {
+        drain_output();
+
+        if (!m_session->partial_output.empty())
+        {
+            m_console_output.push_back(std::move(m_session->partial_output));
+            m_session->partial_output.clear();
+        }
+
+        const int status = m_session->process.GetExitStatus();
+        const char* description = m_session->process.GetExitDescription();
+
+        Log::info("debugger: pid {} exited with status {}{}",
+                  m_process_id,
+                  status,
+                  description != nullptr ? std::format(" ({})", description) : "");
+
+        m_console_output.push_back(std::format("[process {} exited with status {}]",
+                                               m_process_id,
+                                               status));
+
+        m_session->process = lldb::SBProcess();
+        m_process_id = 0;
+        m_stop_reason = StopReason::None;
+
+        m_threads.clear();
+        m_call_stack.clear();
+        m_locals.clear();
+        m_registers.clear();
+
+        m_selected_thread = 0;
+        m_selected_frame = 0;
+
+        set_state(TargetState::Exited);
+    }
+
+    auto Debugger::refresh_call_stack() -> void
+    {
+        m_call_stack.clear();
+
+        if (!is_alive(m_session->process))
+            return;
+
+        lldb::SBThread thread = m_session->process.GetThreadByID(m_selected_thread);
+
+        if (!thread.IsValid())
+            return;
+
+        const uint32_t count = thread.GetNumFrames();
+
+        for (uint32_t index = 0; index < count; ++index)
+        {
+            lldb::SBFrame source = thread.GetFrameAtIndex(index);
+
+            if (!source.IsValid())
+                continue;
+
+            StackFrame frame;
+            frame.index = index;
+            frame.program_counter = source.GetPC();
+            frame.function = name_of(source);
+
+            if (lldb::SBLineEntry entry = source.GetLineEntry(); entry.IsValid())
+            {
+                frame.file = path_of(entry.GetFileSpec());
+                frame.line = entry.GetLine();
+            }
+
+            m_call_stack.push_back(std::move(frame));
+        }
     }
 
     auto Debugger::resolve_breakpoint(Breakpoint& breakpoint) -> void
@@ -442,7 +1013,7 @@ namespace Hsdbg
 
         lldb::SBBreakpoint created;
 
-        if (breakpoint.line == 0)
+        if (breakpoint.by_function)
         {
             // unscoped, a name like main matches every module the target pulls in
             created = m_session->target.BreakpointCreateByName(

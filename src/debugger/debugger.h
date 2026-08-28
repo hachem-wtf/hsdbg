@@ -69,6 +69,11 @@ namespace Hsdbg
 
         auto state() const -> TargetState { return m_state; }
         auto stop_reason() const -> StopReason { return m_stop_reason; }
+
+        // bumped on every stop, so the ui can tell a new one from the one it
+        // already followed
+        auto stop_count() const -> uint64_t { return m_stop_count; }
+
         auto target_path() const -> const std::filesystem::path& { return m_target_path; }
         auto process_id() const -> uint64_t { return m_process_id; }
 
@@ -83,6 +88,14 @@ namespace Hsdbg
         auto set_state(TargetState state) -> void;
         auto resolve_breakpoint(Breakpoint& breakpoint) -> void;
         auto sync_breakpoints() -> void;
+
+        auto require_stopped() const -> Result<void>;
+        auto sync_after_start() -> void;
+        auto pump_events() -> void;
+        auto drain_output() -> void;
+        auto on_stopped() -> void;
+        auto on_exited() -> void;
+        auto refresh_call_stack() -> void;
 
         std::unique_ptr<Session> m_session;
 
@@ -103,5 +116,6 @@ namespace Hsdbg
 
         uint64_t m_selected_thread = 0;
         uint32_t m_selected_frame = 0;
+        uint64_t m_stop_count = 0;
     };
 }

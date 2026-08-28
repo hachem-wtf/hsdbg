@@ -13,6 +13,7 @@ namespace Hsdbg
 {
     class Debugger;
     class Window;
+    struct StackFrame;
 
     class Ui
     {
@@ -64,6 +65,9 @@ namespace Hsdbg
         auto push_console(std::string line) -> void;
         auto report(const Result<void>& result, std::string_view action) -> void;
 
+        auto follow_stop(Debugger& debugger) -> void;
+        auto show_frame(const StackFrame& frame) -> void;
+
         Window* m_window = nullptr;
         SourceView m_source_view;
         PanelVisibility m_visible;
@@ -71,6 +75,8 @@ namespace Hsdbg
         std::vector<std::string> m_console_lines;
         std::string m_console_input;
         std::string m_target_input;
+
+        uint64_t m_followed_stop = 0;
 
         bool m_layout_built = false;
         bool m_console_scroll_pending = false;

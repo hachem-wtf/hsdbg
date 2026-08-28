@@ -72,7 +72,9 @@ namespace Hsdbg
         std::filesystem::path working_directory;
         std::vector<std::string> arguments;
         std::vector<std::string> environment;
-        bool stop_at_entry = true;
+
+        // running should reach the first breakpoint, not the loader's entry point
+        bool stop_at_entry = false;
     };
 
     struct Breakpoint
@@ -87,6 +89,10 @@ namespace Hsdbg
         uint32_t hit_count = 0;
         bool enabled = true;
         bool resolved = false;
+
+        // set by name, so file and line are whatever lldb found rather than
+        // what was asked for
+        bool by_function = false;
     };
 
     struct StackFrame
