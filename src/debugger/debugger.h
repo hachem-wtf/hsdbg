@@ -96,6 +96,7 @@ namespace Hsdbg
         auto on_stopped() -> void;
         auto on_exited() -> void;
         auto refresh_call_stack() -> void;
+        auto refresh_frame_data() -> void;
 
         std::unique_ptr<Session> m_session;
 

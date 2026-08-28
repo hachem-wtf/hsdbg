@@ -176,6 +176,63 @@ namespace Hsdbg
             return message != nullptr && message[0] != '\0' ? message : fallback;
         }
 
+        // a local can be a whole object graph, and every level costs a read from
+        // the inferior, so stop well before anything recursive gets interesting
+        constexpr uint32_t MAX_VARIABLE_DEPTH = 3;
+        constexpr uint32_t MAX_VARIABLE_CHILDREN = 64;
+
+        auto text_or(const char* text, std::string_view fallback) -> std::string
+        {
+            return text != nullptr && text[0] != '\0' ? std::string(text) : std::string(fallback);
+        }
+
+        auto frame_of(lldb::SBProcess& process, uint64_t thread_id, uint32_t frame_index) -> lldb::SBFrame
+        {
+            lldb::SBThread thread = process.GetThreadByID(thread_id);
+
+            if (!thread.IsValid())
+                return {};
+
+            return thread.GetFrameAtIndex(frame_index);
+        }
+
+        auto display_of(lldb::SBValue& value) -> std::string
+        {
+            const char* text = value.GetValue();
+            const char* summary = value.GetSummary();
+
+            if (text != nullptr && summary != nullptr)
+                return std::format("{} {}", text, summary);
+
+            if (text != nullptr)
+                return text;
+
+            return summary != nullptr ? summary : "";
+        }
+
+        auto to_variable(lldb::SBValue value, uint32_t depth) -> Variable
+        {
+            Variable variable;
+            variable.name = text_or(value.GetName(), "?");
+            variable.type = text_or(value.GetDisplayTypeName(), "");
+            variable.value = display_of(value);
+
+            if (depth >= MAX_VARIABLE_DEPTH)
+                return variable;
+
+            const uint32_t children = value.GetNumChildren(MAX_VARIABLE_CHILDREN);
+
+            for (uint32_t index = 0; index < children; ++index)
+            {
+                lldb::SBValue child = value.GetChildAtIndex(index);
+
+                if (child.IsValid())
+                    variable.children.push_back(to_variable(child, depth + 1));
+            }
+
+            return variable;
+        }
+
         auto name_of(lldb::SBFrame& frame) -> std::string
         {
             if (const char* display = frame.GetDisplayFunctionName(); display != nullptr)
@@ -705,15 +762,51 @@ namespace Hsdbg
 
     auto Debugger::evaluate(std::string_view expression) -> Result<std::string>
     {
-        (void)expression;
-        return not_implemented();
+        if (const Result<void> ready = require_stopped(); !ready)
+            return std::unexpected(ready.error());
+
+        lldb::SBFrame frame = frame_of(m_session->process, m_selected_thread, m_selected_frame);
+
+        if (!frame.IsValid())
+            return fail("no frame selected");
+
+        const std::string text(expression);
+        lldb::SBValue value = frame.EvaluateExpression(text.c_str());
+
+        if (lldb::SBError error = value.GetError(); error.Fail())
+            return fail("{}", message_of(error, "could not evaluate"));
+
+        const std::string display = display_of(value);
+
+        if (display.empty())
+            return fail("'{}' has no value", text);
+
+        const std::string type = text_or(value.GetDisplayTypeName(), "");
+
+        return type.empty() ? display : std::format("({}) {}", type, display);
     }
 
     auto Debugger::read_memory(uint64_t address, size_t size) -> Result<std::vector<uint8_t>>
     {
-        (void)address;
-        (void)size;
-        return not_implemented();
+        if (!is_alive(m_session->process))
+            return fail("no running process");
+
+        std::vector<uint8_t> buffer(size);
+
+        lldb::SBError error;
+        const size_t read = m_session->process.ReadMemory(address, buffer.data(), size, error);
+
+        if (error.Fail())
+        {
+            return fail("could not read {} bytes at {:#x}: {}",
+                        size,
+                        address,
+                        message_of(error, "unknown error"));
+        }
+
+        buffer.resize(read);
+
+        return buffer;
     }
 
     auto Debugger::select_thread(uint64_t thread_id) -> bool
@@ -730,6 +823,7 @@ namespace Hsdbg
             m_session->process.SetSelectedThreadByID(m_selected_thread);
 
         refresh_call_stack();
+        refresh_frame_data();
 
         return true;
     }
@@ -748,6 +842,8 @@ namespace Hsdbg
             if (thread.IsValid())
                 thread.SetSelectedFrame(frame_index);
         }
+
+        refresh_frame_data();
 
         return true;
     }
@@ -812,8 +908,11 @@ namespace Hsdbg
 
             switch (lldb::SBProcess::GetStateFromEvent(event))
             {
+                // frame data belongs to a frame that no longer exists
                 case lldb::eStateRunning:
                 case lldb::eStateStepping:
+                    m_locals.clear();
+                    m_registers.clear();
                     set_state(TargetState::Running);
                     break;
 
@@ -927,6 +1026,7 @@ namespace Hsdbg
 
         m_selected_frame = 0;
         refresh_call_stack();
+        refresh_frame_data();
 
         set_state(TargetState::Stopped);
 
@@ -1003,6 +1103,53 @@ namespace Hsdbg
             }
 
             m_call_stack.push_back(std::move(frame));
+        }
+    }
+
+    auto Debugger::refresh_frame_data() -> void
+    {
+        m_locals.clear();
+        m_registers.clear();
+
+        if (!is_alive(m_session->process))
+            return;
+
+        lldb::SBFrame frame = frame_of(m_session->process, m_selected_thread, m_selected_frame);
+
+        if (!frame.IsValid())
+            return;
+
+        lldb::SBValueList variables = frame.GetVariables(true, true, false, true);
+
+        for (uint32_t index = 0; index < variables.GetSize(); ++index)
+        {
+            lldb::SBValue value = variables.GetValueAtIndex(index);
+
+            if (value.IsValid())
+                m_locals.push_back(to_variable(value, 0));
+        }
+
+        lldb::SBValueList sets = frame.GetRegisters();
+
+        for (uint32_t set_index = 0; set_index < sets.GetSize(); ++set_index)
+        {
+            lldb::SBValue set = sets.GetValueAtIndex(set_index);
+            const uint32_t count = set.GetNumChildren();
+
+            for (uint32_t index = 0; index < count; ++index)
+            {
+                lldb::SBValue source = set.GetChildAtIndex(index);
+
+                // vector registers do not fit the one word a Register holds
+                if (!source.IsValid() || source.GetByteSize() > sizeof(uint64_t))
+                    continue;
+
+                Register entry;
+                entry.name = text_or(source.GetName(), "?");
+                entry.value = source.GetValueAsUnsigned();
+
+                m_registers.push_back(std::move(entry));
+            }
         }
     }
 
