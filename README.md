@@ -13,6 +13,8 @@ The usual debugger stuff is there. You can launch or attach to processes, step t
 
 The console lets you type C or C++ directly into the debugger, which LLDB JIT-compiles and runs inside the debugged process. So if you do something like `a = 60` you actually changed `a`, and that change sticks when you continue.
 
+![screenshot](branding/screenshot.png)
+
 ## Build
 hsdbg builds on macOS, Linux, and Windows. You'll need [premake5](https://premake.github.io/) and a C++23 compiler. hsdbg links against LLVM/LLDB. By default, it pulls the pinned LLVM release (22.1.0) for your platform. Alternatively, you can point it at an existing LLVM installation that ships the LLDB headers with `LLVM_PREFIX`, or have `llvm-config` available on your `PATH`.
 
