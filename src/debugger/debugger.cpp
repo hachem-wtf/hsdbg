@@ -1057,16 +1057,37 @@ namespace Hsdbg
         if (!frame.IsValid())
             return fail("no frame selected");
 
+        // the injected code is compiled by lldb's clang and jitted into the
+        // inferior, so any side effect it has (a = 60, *p = ...) writes real
+        // process memory and survives the resume, exactly as if the source had
+        // run it. the options here keep that from derailing the session: a fault
+        // in the snippet is unwound instead of left mid-flight, breakpoints the
+        // snippet reaches are ignored so it cannot stop inside itself, and a
+        // timeout stops a runaway call from hanging the ui
+        lldb::SBExpressionOptions options;
+        options.SetUnwindOnError(true);
+        options.SetIgnoreBreakpoints(true);
+        options.SetTryAllThreads(true);
+        options.SetAutoApplyFixIts(true);
+        options.SetTimeoutInMicroSeconds(5'000'000);
+
         const std::string text(expression);
-        lldb::SBValue value = frame.EvaluateExpression(text.c_str());
+        lldb::SBValue value = frame.EvaluateExpression(text.c_str(), options);
 
         if (lldb::SBError error = value.GetError(); error.Fail())
             return fail("{}", message_of(error, "could not evaluate"));
 
+        // the snippet may have printed, and it may have moved memory the panels
+        // are showing, so surface both before returning to the caller
+        drain_output();
+        refresh_frame_data();
+
         const std::string display = display_of(value);
 
+        // a pure statement (a plain assignment counts) yields no value to show,
+        // but it still ran and its side effects landed, so report success
         if (display.empty())
-            return fail("'{}' has no value", text);
+            return std::format("{} applied", text);
 
         const std::string type = text_or(value.GetDisplayTypeName(), "");
 
