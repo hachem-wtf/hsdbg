@@ -1,6 +1,6 @@
-<h1 align="center">
-  <img src="branding/peepocry.gif" alt="" width="56" align="middle" />
-  &nbsp;hsdbg: hachem's stupid debugger
+<h1 align="left">
+  <img src="branding/peepocry.gif" alt="" width="56" style="vertical-align: middle;" />
+  hachem's stupid debugger
 </h1>
 
 hsdbg is a cross-platform GUI debugger for C and C++. I wrote it because I didn't like the options I had. Debugging is a visual thing, at least to me. I want to see the source, the state of the program, the stack, my variables, registers, and whatever else is going on, all at once. Most of the good C/C++ debuggers are either terminal programs or tied to one platform. The only ones I've actually liked are RemedyBG and Visual Studio. Both are Windows-only. I'm not on Windows, so I made my own.
