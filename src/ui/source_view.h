@@ -11,6 +11,26 @@ namespace Hsdbg
 {
     class Debugger;
 
+    // one coloured run inside a source line; start and length index into the
+    // line's own string so the spans stay valid as long as the line does
+    enum class SyntaxKind : uint8_t
+    {
+        Default,
+        Keyword,
+        Type,
+        String,
+        Number,
+        Comment,
+        Preprocessor,
+    };
+
+    struct SourceSpan
+    {
+        uint32_t start;
+        uint32_t length;
+        SyntaxKind kind;
+    };
+
     class SourceView
     {
     public:
@@ -31,6 +51,8 @@ namespace Hsdbg
 
         std::filesystem::path m_path;
         std::vector<std::string> m_lines;
+        std::vector<std::vector<SourceSpan>> m_spans;
+        bool m_highlight = false;
         std::string m_path_input;
         std::string m_error;
         uint32_t m_highlighted_line = 0;
