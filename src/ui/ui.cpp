@@ -55,6 +55,15 @@ namespace Hsdbg
         const ImU32 BREAKPOINT_DISABLED_COLOR = IM_COL32(120, 90, 90, 255);
         const ImU32 BREAKPOINT_HOVER_COLOR = IM_COL32(226, 84, 84, 90);
 
+        // folders read as structure, so they take a cool tint; the file that is
+        // currently open in the source view keeps its accent even when the row
+        // is not the selected one, so it stays easy to find in a long tree
+        const ImU32 SOURCE_FOLDER_COLOR = IM_COL32(150, 178, 214, 255);
+        const ImU32 SOURCE_OPEN_FILE_COLOR = IM_COL32(126, 194, 126, 255);
+
+        // the dim connectors drawn between a folder and its children
+        const ImU32 SOURCE_TREE_LINE_COLOR = IM_COL32(110, 110, 122, 160);
+
         auto breakpoint_at(Debugger& debugger, const Instruction& instruction) -> const Breakpoint*
         {
             for (const Breakpoint& candidate : debugger.breakpoints())
@@ -1087,6 +1096,8 @@ namespace Hsdbg
                 const SourceNode tree = build_source_tree(files);
                 const std::filesystem::path& open = m_source_view.path();
 
+                ImDrawList* const draw_list = ImGui::GetWindowDrawList();
+
                 const auto draw_node = [&](this const auto& self, const SourceNode& node) -> void
                 {
                     if (!source_node_matches(node, m_source_filter))
@@ -1096,7 +1107,15 @@ namespace Hsdbg
                     {
                         const bool selected = node.path == open;
 
-                        if (ImGui::Selectable(node.name.c_str(), selected))
+                        if (selected)
+                            ImGui::PushStyleColor(ImGuiCol_Text, SOURCE_OPEN_FILE_COLOR);
+
+                        const bool clicked = ImGui::Selectable(node.name.c_str(), selected);
+
+                        if (selected)
+                            ImGui::PopStyleColor();
+
+                        if (clicked)
                         {
                             open_source(node.path);
                             ImGui::SetWindowFocus(PANEL_SOURCE);
@@ -1109,16 +1128,48 @@ namespace Hsdbg
                     }
 
                     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth |
-                                               ImGuiTreeNodeFlags_OpenOnArrow;
+                                               ImGuiTreeNodeFlags_OpenOnArrow |
+                                               ImGuiTreeNodeFlags_OpenOnDoubleClick;
 
                     if (m_source_filter.empty())
                         flags |= ImGuiTreeNodeFlags_DefaultOpen;
 
-                    if (!ImGui::TreeNodeEx(node.name.c_str(), flags))
+                    ImGui::PushStyleColor(ImGuiCol_Text, SOURCE_FOLDER_COLOR);
+                    const bool open_node = ImGui::TreeNodeEx(node.name.c_str(), flags);
+                    ImGui::PopStyleColor();
+
+                    if (!open_node)
                         return;
 
+                    // connect this folder to each visible child the way `tree`
+                    // does: a vertical spine down the gutter with a horizontal
+                    // tick out to every child, the spine ending at the last one.
+                    // the glyphs would be tofu in the default font, so the lines
+                    // are drawn by hand
+                    const float indent = ImGui::GetStyle().IndentSpacing;
+                    const float half_row = ImGui::GetTextLineHeight() * 0.5f;
+                    const float spine_x = ImGui::GetCursorScreenPos().x - indent * 0.5f;
+                    const float top_y = ImGui::GetCursorScreenPos().y;
+                    float last_y = top_y;
+
                     for (const SourceNode& child : node.children)
+                    {
+                        if (!source_node_matches(child, m_source_filter))
+                            continue;
+
+                        const float row_y = ImGui::GetCursorScreenPos().y + half_row;
+
+                        draw_list->AddLine(ImVec2(spine_x, row_y),
+                                           ImVec2(spine_x + indent * 0.5f - 3.0f, row_y),
+                                           SOURCE_TREE_LINE_COLOR);
+                        last_y = row_y;
+
                         self(child);
+                    }
+
+                    draw_list->AddLine(ImVec2(spine_x, top_y),
+                                       ImVec2(spine_x, last_y),
+                                       SOURCE_TREE_LINE_COLOR);
 
                     ImGui::TreePop();
                 };
