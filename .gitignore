@@ -11,6 +11,7 @@ Makefile
 *.xcodeproj/
 
 .cache/
+.DS_Store
 
 compile_commands.json
 compile_flags.txt
