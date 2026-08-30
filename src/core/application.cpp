@@ -113,15 +113,17 @@ namespace Hsdbg
 
     auto Application::render() -> void
     {
-        m_ui->begin_frame();
-        m_ui->draw(*m_debugger);
-
+        // clear the whole framebuffer at the very start of the frame, before any
+        // drawing, so nothing from the previous frame can survive underneath
         glViewport(0, 0,
                    static_cast<GLsizei>(m_window->framebuffer_width()),
                    static_cast<GLsizei>(m_window->framebuffer_height()));
+        glDisable(GL_SCISSOR_TEST);
         glClearColor(0.05f, 0.05f, 0.06f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+        m_ui->begin_frame();
+        m_ui->draw(*m_debugger);
         m_ui->end_frame();
     }
 }

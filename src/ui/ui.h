@@ -1,6 +1,8 @@
 #pragma once
 
 #include "core/result.h"
+#include "ui/animated_image.h"
+#include "ui/image_renderer.h"
 #include "ui/source_view.h"
 
 #include <cstdint>
@@ -78,6 +80,20 @@ namespace Hsdbg
         Window* m_window = nullptr;
         SourceView m_source_view;
         PanelVisibility m_visible;
+
+        // the crying-pepe that lives in the toolbar; loaded on the first frame
+        // once there is a gl context to upload its textures to, and drawn with a
+        // dedicated shader after imgui rather than through ImGui::Image
+        AnimatedImage m_mascot;
+        ImageRenderer m_image_renderer;
+        bool m_mascot_loaded = false;
+        bool m_image_renderer_ready = false;
+        bool m_mascot_pending = false;
+        unsigned int m_mascot_texture = 0;
+        float m_mascot_x0 = 0.0f;
+        float m_mascot_y0 = 0.0f;
+        float m_mascot_x1 = 0.0f;
+        float m_mascot_y1 = 0.0f;
 
         std::vector<std::string> m_console_lines;
         std::string m_console_input;

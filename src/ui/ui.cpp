@@ -18,6 +18,10 @@
 #include <span>
 #include <vector>
 
+#ifndef HSDBG_ASSET_DIR
+    #define HSDBG_ASSET_DIR ""
+#endif
+
 namespace Hsdbg
 {
     namespace
@@ -443,6 +447,26 @@ namespace Hsdbg
     {
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        if (m_mascot_pending && m_mascot_texture != 0)
+        {
+            if (!m_image_renderer_ready)
+                m_image_renderer_ready = m_image_renderer.init();
+
+            if (m_image_renderer_ready)
+            {
+                const ImVec2 scale = ImGui::GetIO().DisplayFramebufferScale;
+                const int width = static_cast<int>(m_window->framebuffer_width());
+                const int height = static_cast<int>(m_window->framebuffer_height());
+
+                m_image_renderer.draw(m_mascot_texture,
+                                      m_mascot_x0 * scale.x, m_mascot_y0 * scale.y,
+                                      m_mascot_x1 * scale.x, m_mascot_y1 * scale.y,
+                                      width, height);
+            }
+        }
+
+        m_mascot_pending = false;
     }
 
     auto Ui::open_source(const std::filesystem::path& path) -> void
@@ -735,10 +759,23 @@ namespace Hsdbg
         const bool has_target = debugger.has_target();
         const bool running = debugger.is_running();
 
+        if (!m_mascot_loaded)
+        {
+            m_mascot_loaded = true;
+            m_mascot.load(std::filesystem::path(HSDBG_ASSET_DIR) / "peepocry.gif");
+        }
+
+        const float button_height = ImGui::GetFrameHeight();
+        const bool has_mascot = m_mascot.valid() && m_mascot.height() > 0.0f;
+        const float mascot_height = has_mascot ? button_height * 1.6f : 0.0f;
+        const float row_height = std::max(button_height, mascot_height);
+
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 6.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, TOOLBAR_PADDING);
-        ImGui::BeginChild("##toolbar",
-                          ImVec2(0.0f, ImGui::GetFrameHeight() + TOOLBAR_PADDING.y * 2.0f));
+        ImGui::BeginChild("##toolbar", ImVec2(0.0f, row_height + TOOLBAR_PADDING.y * 2.0f));
+
+        const float row_top = ImGui::GetCursorPosY();
+        ImGui::SetCursorPosY(row_top + (row_height - button_height) * 0.5f);
 
         ImGui::BeginDisabled(!has_target || running);
         if (ImGui::Button("run"))
@@ -787,6 +824,30 @@ namespace Hsdbg
 
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(state_color(debugger.state()), "%s", to_string(debugger.state()).data());
+
+        if (has_mascot)
+        {
+            const ImVec2 size(mascot_height * (m_mascot.width() / m_mascot.height()), mascot_height);
+
+            ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - size.x);
+            ImGui::SetCursorPosY(row_top);
+
+            // reserve the spot but let imgui draw nothing here; the mascot is
+            // rendered by our own shader after imgui, straight to the framebuffer
+            const ImVec2 origin = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(size);
+
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("it's going to be okay");
+
+            const ImVec2 viewport = ImGui::GetMainViewport()->Pos;
+            m_mascot_pending = true;
+            m_mascot_texture = m_mascot.texture();
+            m_mascot_x0 = origin.x - viewport.x;
+            m_mascot_y0 = origin.y - viewport.y;
+            m_mascot_x1 = m_mascot_x0 + size.x;
+            m_mascot_y1 = m_mascot_y0 + size.y;
+        }
 
         ImGui::EndChild();
         ImGui::PopStyleVar(2);

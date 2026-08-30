@@ -490,6 +490,7 @@ project "hsdbg"
         "%{include_dir.imgui}",
         "%{include_dir.imgui_backends}",
         "%{include_dir.lldb}",
+        "ext/stb",
     }
 
     links {
@@ -499,6 +500,8 @@ project "hsdbg"
     }
 
     defines { "HSDBG_LLVM_PREFIX=\"" .. llvm_dir .. "\"" }
+
+    defines { "HSDBG_ASSET_DIR=\"" .. _MAIN_SCRIPT_DIR .. "/assets\"" }
 
     linkoptions { lldb_library() }
 
