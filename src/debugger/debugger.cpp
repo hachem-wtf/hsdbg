@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <cstdio>
 #include <set>
 #include <source_location>
 
@@ -85,6 +87,79 @@ namespace Hsdbg
         auto text_or(const char* text, std::string_view fallback) -> std::string
         {
             return text != nullptr && text[0] != '\0' ? std::string(text) : std::string(fallback);
+        }
+
+        // runs a command and hands back its stdout, trimmed; empty if it could
+        // not be spawned (used to ask the toolchain where it lives)
+        auto capture_command(const char* command) -> std::string
+        {
+#ifdef HSDBG_WINDOWS
+            FILE* pipe = _popen(command, "r");
+#else
+            FILE* pipe = popen(command, "r");
+#endif
+            if (pipe == nullptr)
+                return {};
+
+            std::string output;
+            std::array<char, 256> chunk{};
+
+            while (std::fgets(chunk.data(), static_cast<int>(chunk.size()), pipe) != nullptr)
+                output += chunk.data();
+
+#ifdef HSDBG_WINDOWS
+            _pclose(pipe);
+#else
+            pclose(pipe);
+#endif
+
+            while (!output.empty() && std::isspace(static_cast<unsigned char>(output.back())) != 0)
+                output.pop_back();
+
+            return output;
+        }
+
+        // rust ships lldb data formatters (the same ones rust-lldb sources) that
+        // teach lldb how to print String, Vec, Option, enums and friends. without
+        // them those show as raw structs, so pull them in if a toolchain is around.
+        // harmless for c/c++ targets, and a no-op if lldb has no python scripting
+        auto load_rust_formatters(lldb::SBDebugger& debugger) -> void
+        {
+            const std::string sysroot = capture_command("rustc --print sysroot 2>/dev/null");
+
+            if (sysroot.empty())
+                return;
+
+            const std::filesystem::path etc =
+                std::filesystem::path(sysroot) / "lib" / "rustlib" / "etc";
+
+            std::error_code error;
+            if (!std::filesystem::exists(etc / "lldb_commands", error))
+                return;
+
+            lldb::SBCommandInterpreter interpreter = debugger.GetCommandInterpreter();
+            lldb::SBCommandReturnObject result;
+
+            const std::string import =
+                std::format("command script import \"{}\"", (etc / "lldb_lookup.py").string());
+            interpreter.HandleCommand(import.c_str(), result);
+
+            if (!result.Succeeded())
+            {
+                Log::warn("debugger: rust formatters unavailable ({})",
+                          text_or(result.GetError(), "lldb has no python scripting"));
+                return;
+            }
+
+            const std::string source =
+                std::format("command source \"{}\"", (etc / "lldb_commands").string());
+            interpreter.HandleCommand(source.c_str(), result);
+
+            if (result.Succeeded())
+                Log::info("debugger: loaded rust type formatters from {}", etc.string());
+            else
+                Log::warn("debugger: could not load rust formatters ({})",
+                          text_or(result.GetError(), "unknown error"));
         }
 
         auto path_of(lldb::SBFileSpec spec) -> std::filesystem::path
@@ -463,6 +538,8 @@ namespace Hsdbg
         m_session->listener = lldb::SBListener("hsdbg");
 
         Log::info("debugger: {}", lldb::SBDebugger::GetVersionString());
+
+        load_rust_formatters(m_session->debugger);
     }
 
     Debugger::~Debugger()

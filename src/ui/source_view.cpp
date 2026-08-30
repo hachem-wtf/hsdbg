@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <optional>
 #include <string_view>
 #include <unordered_set>
 
@@ -37,6 +38,12 @@ namespace Hsdbg
             return 0;
         }
 
+        enum class Language : uint8_t
+        {
+            Cpp,
+            Rust,
+        };
+
         auto is_word_start(char c) -> bool
         {
             return std::isalpha(static_cast<unsigned char>(c)) != 0 || c == '_';
@@ -47,9 +54,9 @@ namespace Hsdbg
             return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
         }
 
-        auto classify_word(std::string_view word) -> SyntaxKind
+        auto classify_word(std::string_view word, Language language) -> SyntaxKind
         {
-            static const std::unordered_set<std::string_view> keywords = {
+            static const std::unordered_set<std::string_view> cpp_keywords = {
                 "alignas", "alignof", "and", "and_eq", "asm", "bitand", "bitor", "break",
                 "case", "catch", "class", "co_await", "co_return", "co_yield", "compl",
                 "concept", "const", "consteval", "constexpr", "constinit", "const_cast",
@@ -64,12 +71,31 @@ namespace Hsdbg
                 "xor", "xor_eq",
             };
 
-            static const std::unordered_set<std::string_view> types = {
+            static const std::unordered_set<std::string_view> cpp_types = {
                 "auto", "bool", "char", "char8_t", "char16_t", "char32_t", "double", "float",
                 "int", "int8_t", "int16_t", "int32_t", "int64_t", "intptr_t", "long",
                 "ptrdiff_t", "short", "signed", "size_t", "ssize_t", "uint8_t", "uint16_t",
                 "uint32_t", "uint64_t", "uintptr_t", "unsigned", "void", "wchar_t",
             };
+
+            static const std::unordered_set<std::string_view> rust_keywords = {
+                "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else",
+                "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop",
+                "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self",
+                "static", "struct", "super", "trait", "true", "type", "union", "unsafe",
+                "use", "where", "while", "box", "dyn", "macro_rules", "yield",
+            };
+
+            static const std::unordered_set<std::string_view> rust_types = {
+                "bool", "char", "str", "String", "i8", "i16", "i32", "i64", "i128", "isize",
+                "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64", "Vec", "Option",
+                "Result", "Box", "Rc", "Arc", "Cell", "RefCell", "HashMap", "HashSet",
+                "BTreeMap", "BTreeSet", "VecDeque", "Cow",
+            };
+
+            const bool rust = language == Language::Rust;
+            const auto& keywords = rust ? rust_keywords : cpp_keywords;
+            const auto& types = rust ? rust_types : cpp_types;
 
             if (keywords.contains(word))
                 return SyntaxKind::Keyword;
@@ -94,7 +120,7 @@ namespace Hsdbg
         // splits every line into contiguous coloured spans. the whole file is
         // walked in order so a block comment opened on one line stays open on the
         // next, which a per-line pass could not know
-        auto highlight_lines(const std::vector<std::string>& lines)
+        auto highlight_lines(const std::vector<std::string>& lines, Language language)
             -> std::vector<std::vector<SourceSpan>>
         {
             std::vector<std::vector<SourceSpan>> out(lines.size());
@@ -170,6 +196,22 @@ namespace Hsdbg
                         continue;
                     }
 
+                    // a rust lifetime ('a) looks like an unterminated char literal,
+                    // so peel it off as an identifier before the string handling
+                    if (c == '\'' && language == Language::Rust && at + 1 < size &&
+                        is_word_start(line[at + 1]) && !(at + 2 < size && line[at + 2] == '\''))
+                    {
+                        flush_default(at);
+                        const uint32_t start = at++;
+
+                        while (at < size && is_word(line[at]))
+                            ++at;
+
+                        emit(start, at - start, SyntaxKind::Default);
+                        run = at;
+                        continue;
+                    }
+
                     if (c == '"' || c == '\'')
                     {
                         flush_default(at);
@@ -197,7 +239,7 @@ namespace Hsdbg
                         continue;
                     }
 
-                    if (c == '#' && only_space_before(line, at))
+                    if (c == '#' && language == Language::Cpp && only_space_before(line, at))
                     {
                         flush_default(at);
                         const uint32_t start = at++;
@@ -222,7 +264,7 @@ namespace Hsdbg
                             const char d = line[at];
 
                             if (std::isalnum(static_cast<unsigned char>(d)) != 0 ||
-                                d == '.' || d == '\'')
+                                d == '.' || d == '\'' || d == '_')
                                 ++at;
                             else
                                 break;
@@ -240,8 +282,8 @@ namespace Hsdbg
                         while (at < size && is_word(line[at]))
                             ++at;
 
-                        if (const SyntaxKind kind =
-                                classify_word(std::string_view(line).substr(start, at - start));
+                        if (const SyntaxKind kind = classify_word(
+                                std::string_view(line).substr(start, at - start), language);
                             kind != SyntaxKind::Default)
                         {
                             flush_default(start);
@@ -261,9 +303,9 @@ namespace Hsdbg
             return out;
         }
 
-        auto is_highlightable(const std::filesystem::path& path) -> bool
+        auto language_of(const std::filesystem::path& path) -> std::optional<Language>
         {
-            static const std::unordered_set<std::string_view> extensions = {
+            static const std::unordered_set<std::string_view> cpp = {
                 ".c", ".h", ".cc", ".cp", ".cpp", ".cxx", ".c++", ".hh", ".hpp", ".hxx",
                 ".h++", ".inl", ".ipp", ".m", ".mm", ".cu", ".cuh",
             };
@@ -274,7 +316,13 @@ namespace Hsdbg
                 return static_cast<char>(std::tolower(ch));
             });
 
-            return extensions.contains(ext);
+            if (ext == ".rs")
+                return Language::Rust;
+
+            if (cpp.contains(ext))
+                return Language::Cpp;
+
+            return std::nullopt;
         }
 
         // the dot sits in the gutter with this much room on either side, and the
@@ -310,10 +358,13 @@ namespace Hsdbg
             lines.push_back(std::move(line));
         }
 
+        const std::optional<Language> language = language_of(path);
+
         m_path = path;
         m_lines = std::move(lines);
-        m_highlight = is_highlightable(path);
-        m_spans = m_highlight ? highlight_lines(m_lines) : std::vector<std::vector<SourceSpan>>{};
+        m_highlight = language.has_value();
+        m_spans = language ? highlight_lines(m_lines, *language)
+                           : std::vector<std::vector<SourceSpan>>{};
         m_path_input = path.string();
         m_error.clear();
         m_highlighted_line = 0;
