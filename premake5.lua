@@ -28,7 +28,9 @@ function llvm_prefix()
         end
 
         local prefix = path.getabsolute(
-            (candidate:gsub("%s+$", "")):gsub("\\", "/"), _MAIN_SCRIPT_DIR)
+            (candidate:gsub("%s+$", "")):gsub("\\", "/"),
+            _MAIN_SCRIPT_DIR
+        )
 
         return os.isdir(prefix .. "/include/lldb") and prefix or nil
     end
@@ -53,8 +55,10 @@ function llvm_prefix()
         or usable(os.outputof("llvm-config --prefix"))
 
     if prefix == nil and os.host() == "windows" then
-        prefix = usable(os.getenv("ProgramFiles") and os.getenv("ProgramFiles") .. "/LLVM")
-            or newest_of("C:/Program Files/LLVM*")
+        prefix = usable(
+            os.getenv("ProgramFiles") and
+            os.getenv("ProgramFiles") .. "/LLVM"
+        ) or newest_of("C:/Program Files/LLVM*")
     end
 
     if prefix == nil and os.host() == "macosx" then
@@ -62,7 +66,8 @@ function llvm_prefix()
     end
 
     if prefix == nil and os.host() == "linux" then
-        prefix = newest_of("/usr/lib/llvm-*") or newest_of("/usr/local/llvm*")
+        prefix = newest_of("/usr/lib/llvm-*")
+            or newest_of("/usr/local/llvm*")
     end
 
     return prefix
@@ -70,9 +75,17 @@ end
 
 llvm_dir = llvm_prefix()
 
-if llvm_dir == nil and _ACTION ~= nil and _ACTION ~= "fetch-llvm" and _ACTION ~= "clean" then
-    error("no llvm with lldb headers found. install one and set LLVM_PREFIX, " ..
-        "or run `premake5 fetch-llvm` to download the pinned " .. llvm_version .. " release")
+if llvm_dir == nil
+    and _ACTION ~= nil
+    and _ACTION ~= "fetch-llvm"
+    and _ACTION ~= "clean"
+    and _ACTION ~= "check"
+then
+    error(
+        "no llvm with lldb headers found. install one and set LLVM_PREFIX, " ..
+        "or run `premake5 fetch-llvm` to download the pinned " ..
+        llvm_version .. " release"
+    )
 end
 
 llvm_dir = llvm_dir or ""
@@ -110,7 +123,10 @@ function lldb_library()
         end
     end
 
-    local versioned = os.matchfiles(library_dir.lldb .. "/liblldb.so.*")
+    local versioned = os.matchfiles(
+        library_dir.lldb .. "/liblldb.so.*"
+    )
+
     table.sort(versioned)
 
     if versioned[#versioned] ~= nil then
@@ -121,7 +137,11 @@ function lldb_library()
         return library_dir.lldb .. "/" .. names[1]
     end
 
-    error("llvm at " .. llvm_dir .. " has lldb headers but no liblldb in " .. library_dir.lldb)
+    error(
+        "llvm at " .. llvm_dir ..
+        " has lldb headers but no liblldb in " ..
+        library_dir.lldb
+    )
 end
 
 function windows_runtime_copies()
@@ -131,26 +151,36 @@ function windows_runtime_copies()
         return commands
     end
 
-    local runtimes = os.matchfiles(llvm_dir .. "/bin/liblldb.dll")
+    local runtimes = os.matchfiles(
+        llvm_dir .. "/bin/liblldb.dll"
+    )
 
-    for _, runtime in ipairs(os.matchfiles(llvm_dir .. "/bin/python*.dll")) do
+    for _, runtime in ipairs(
+        os.matchfiles(llvm_dir .. "/bin/python*.dll")
+    ) do
         table.insert(runtimes, runtime)
     end
 
     if #runtimes == 0 then
-        runtimes = { llvm_dir .. "/bin/liblldb.dll" }
+        runtimes = {
+            llvm_dir .. "/bin/liblldb.dll",
+        }
     end
 
     for _, runtime in ipairs(runtimes) do
-        table.insert(commands, '{COPYFILE} "' .. runtime .. '" "%{cfg.targetdir}"')
+        table.insert(
+            commands,
+            '{COPYFILE} "' .. runtime .. '" "%{cfg.targetdir}"'
+        )
     end
 
     return commands
 end
 
 function setup_target()
-    targetdir ("bin/" .. output_dir)
-    objdir ("bin-int/" .. output_dir .. "/%{prj.name}")
+    targetdir("bin/" .. output_dir)
+    objdir("bin-int/" .. output_dir .. "/%{prj.name}")
+
     staticruntime "On"
 
     filter "system:windows"
@@ -161,21 +191,85 @@ end
 function setup_c_target()
     setup_target()
 
+    filter { "system:linux or system:macosx" }
+        buildoptions {
+            "-Wall",
+            "-Wextra",
+            "-Wpedantic",
+            "-Wconversion",
+            "-Wsign-conversion",
+            "-Wshadow",
+            "-Wstrict-prototypes",
+            "-Wmissing-prototypes",
+        }
+    filter {}
+
     filter "configurations:debug"
         runtime "Debug"
         symbols "On"
-    filter { "configurations:release", "configurations:dist" }
+
+        filter { "system:linux or system:macosx" }
+            buildoptions {
+                "-g",
+                "-fno-omit-frame-pointer",
+                "-fsanitize=address,undefined",
+            }
+
+            linkoptions {
+                "-fsanitize=address,undefined",
+            }
+        filter {}
+
+    filter { "configurations:release or configurations:dist" }
         runtime "Release"
         optimize "Speed"
+    filter {}
+
     filter "configurations:dist"
         symbols "Off"
     filter {}
 end
 
 function setup_cpp_target()
-    setup_c_target()
+    setup_target()
 
     cppdialect "C++23"
+
+    filter { "system:linux or system:macosx" }
+        buildoptions {
+            "-Wall",
+            "-Wextra",
+            "-Wpedantic",
+            "-Wconversion",
+            "-Wsign-conversion",
+            "-Wshadow",
+        }
+    filter {}
+
+    filter "configurations:debug"
+        runtime "Debug"
+        symbols "On"
+
+        filter { "system:linux or system:macosx" }
+            buildoptions {
+                "-g",
+                "-fno-omit-frame-pointer",
+                "-fsanitize=address,undefined",
+            }
+
+            linkoptions {
+                "-fsanitize=address,undefined",
+            }
+        filter {}
+
+    filter { "configurations:release or configurations:dist" }
+        runtime "Release"
+        optimize "Speed"
+    filter {}
+
+    filter "configurations:dist"
+        symbols "Off"
+    filter {}
 end
 
 newaction {
@@ -188,7 +282,12 @@ newaction {
         os.rmdir(".vs")
         os.remove("Makefile")
 
-        local patterns = { "*.make", "*.sln", "*.vcxproj", "*.vcxproj.*" }
+        local patterns = {
+            "*.make",
+            "*.sln",
+            "*.vcxproj",
+            "*.vcxproj.*",
+        }
 
         for _, pattern in ipairs(patterns) do
             for _, file in ipairs(os.matchfiles(pattern)) do
@@ -201,44 +300,99 @@ newaction {
 }
 
 newaction {
+    trigger = "check",
+    description = "Run static analysis with cppcheck",
+
+    execute = function()
+        local result = os.execute("make clean")
+
+        if result ~= true and result ~= 0 then
+            error("Failed to clean project")
+        end
+
+        result = os.execute("bear -- make config=debug")
+
+        if result ~= true and result ~= 0 then
+            error("Failed to generate compile_commands.json")
+        end
+
+        result = os.execute(
+            "cppcheck " ..
+            "--project=compile_commands.json " ..
+            "--file-filter=src/** " ..
+            "--enable=warning,style,performance,portability " ..
+            "--error-exitcode=1"
+        )
+
+        if result ~= true and result ~= 0 then
+            error("cppcheck found issues")
+        end
+    end
+}
+
+newaction {
     trigger = "fetch-llvm",
     description = "Download the pinned llvm release into " .. llvm_vendored_dir,
 
     execute = function()
         if os.isdir(llvm_vendored_dir .. "/include/lldb") then
-            print(llvm_vendored_dir .. " already has an llvm with lldb headers")
+            print(
+                llvm_vendored_dir ..
+                " already has an llvm with lldb headers"
+            )
             return
         end
 
         local asset = llvm_release_asset()
 
         if asset == nil then
-            error("no pinned llvm release for " .. os.host() .. " " .. os.hostarch() ..
-                ", install llvm yourself and set LLVM_PREFIX")
+            error(
+                "no pinned llvm release for " ..
+                os.host() .. " " .. os.hostarch() ..
+                ", install llvm yourself and set LLVM_PREFIX"
+            )
         end
 
         local archive = "ext/" .. asset
         local staging = "ext/llvm-staging"
 
         if not os.isfile(archive) then
-            local url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-" ..
+            local url =
+                "https://github.com/llvm/llvm-project/releases/download/llvmorg-" ..
                 llvm_version .. "/" .. asset
 
             print("downloading " .. url)
 
             local reported = 0
-            local result, code = http.download(url, archive, {
-                progress = function(total, current)
-                    if total > 0 and current - reported >= total / 20 then
-                        reported = current
-                        printf("  %d%% (%.0f mb)", math.floor(current / total * 100), current / 1048576)
+
+            local result, code = http.download(
+                url,
+                archive,
+                {
+                    progress = function(total, current)
+                        if total > 0
+                            and current - reported >= total / 20
+                        then
+                            reported = current
+
+                            printf(
+                                "  %d%% (%.0f mb)",
+                                math.floor(current / total * 100),
+                                current / 1048576
+                            )
+                        end
                     end
-                end
-            })
+                }
+            )
 
             if result ~= "OK" then
                 os.remove(archive)
-                error("download failed with " .. tostring(code) .. ": " .. tostring(result))
+
+                error(
+                    "download failed with " ..
+                    tostring(code) .. ": " ..
+                    tostring(result)
+                )
             end
         end
 
@@ -247,11 +401,18 @@ newaction {
 
         print("extracting " .. asset)
 
-        local extracted = os.execute('tar -xf "' .. archive .. '" -C "' .. staging .. '"')
+        local extracted = os.execute(
+            'tar -xf "' .. archive ..
+            '" -C "' .. staging .. '"'
+        )
 
         if extracted ~= true and extracted ~= 0 then
-            error("could not extract " .. archive .. ", the system tar may lack xz support, " ..
-                "unpack it into " .. llvm_vendored_dir .. " by hand")
+            error(
+                "could not extract " .. archive ..
+                ", the system tar may lack xz support, " ..
+                "unpack it into " .. llvm_vendored_dir ..
+                " by hand"
+            )
         end
 
         local unpacked = os.matchdirs(staging .. "/*")[1]
@@ -263,16 +424,21 @@ newaction {
         os.rmdir(llvm_vendored_dir)
 
         if not os.rename(unpacked, llvm_vendored_dir) then
-            error("could not move " .. unpacked .. " to " .. llvm_vendored_dir)
+            error(
+                "could not move " .. unpacked ..
+                " to " .. llvm_vendored_dir
+            )
         end
 
         os.rmdir(staging)
         os.remove(archive)
 
-        print("llvm " .. llvm_version .. " is ready in " .. llvm_vendored_dir)
+        print(
+            "llvm " .. llvm_version ..
+            " is ready in " .. llvm_vendored_dir
+        )
     end
 }
-
 
 workspace "hsdbg"
     architecture(host_architecture)
@@ -287,14 +453,17 @@ workspace "hsdbg"
 
     filter "system:windows"
         defines "HSDBG_WINDOWS"
+
     filter "system:linux"
         defines "HSDBG_LINUX"
+
     filter "system:macosx"
         defines "HSDBG_MACOS"
+
     filter {}
 
-
 group "dependencies"
+
 project "glfw"
     kind "StaticLib"
     language "C"
@@ -403,6 +572,7 @@ project "glfw"
         }
 
     filter {}
+
 project "glad"
     kind "StaticLib"
     language "C"
@@ -420,6 +590,7 @@ project "glad"
     filter { "system:linux or system:macosx" }
         pic "On"
     filter {}
+
 project "imgui"
     kind "StaticLib"
     language "C++"
@@ -460,11 +631,15 @@ project "imgui"
 
     filter { "system:linux or system:macosx" }
         pic "On"
+
     filter "system:macosx"
         defines "GL_SILENCE_DEPRECATION"
+
     filter "system:windows"
         defines "_CRT_SECURE_NO_WARNINGS"
+
     filter {}
+
 group ""
 
 project "hsdbg"
@@ -499,11 +674,14 @@ project "hsdbg"
         "imgui",
     }
 
-    defines { "HSDBG_LLVM_PREFIX=\"" .. llvm_dir .. "\"" }
+    defines {
+        "HSDBG_LLVM_PREFIX=\"" .. llvm_dir .. "\"",
+        "HSDBG_ASSET_DIR=\"" .. _MAIN_SCRIPT_DIR .. "/assets\"",
+    }
 
-    defines { "HSDBG_ASSET_DIR=\"" .. _MAIN_SCRIPT_DIR .. "/assets\"" }
-
-    linkoptions { lldb_library() }
+    linkoptions {
+        lldb_library(),
+    }
 
     filter "system:windows"
         systemversion "latest"
@@ -511,8 +689,12 @@ project "hsdbg"
         links "opengl32"
 
         postbuildcommands(windows_runtime_copies())
+
     filter "system:not windows"
-        linkoptions { "-Wl,-rpath," .. library_dir.lldb }
+        linkoptions {
+            "-Wl,-rpath," .. library_dir.lldb,
+        }
+
     filter "system:linux"
         links {
             "GL",
@@ -520,6 +702,7 @@ project "hsdbg"
             "m",
             "pthread",
         }
+
     filter "system:macosx"
         defines "GL_SILENCE_DEPRECATION"
 
@@ -534,8 +717,12 @@ project "hsdbg"
 
     filter "configurations:debug"
         defines "HSDBG_DEBUG"
+
     filter "configurations:release"
         defines "HSDBG_RELEASE"
+
     filter "configurations:dist"
         defines "HSDBG_DIST"
+
     filter {}
+
