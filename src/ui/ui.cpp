@@ -418,8 +418,18 @@ namespace Hsdbg
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
         io.ConfigWindowsMoveFromTitleBarOnly = true;
 
+        // the scalable default font re-rasterizes at any size; the classic bitmap
+        // one only looks clean at 13px and turns to mush when the ui is scaled
+        io.Fonts->AddFontDefaultVector();
+
         // a saved layout beats the built in one, so only build when there is none
         m_layout_built = io.IniFilename != nullptr && std::filesystem::exists(io.IniFilename);
+
+        // sit the settings file next to imgui's own layout file
+        m_preferences_path = io.IniFilename != nullptr
+                                 ? std::filesystem::path(io.IniFilename).parent_path() / "hsdbg.ini"
+                                 : std::filesystem::path("hsdbg.ini");
+        m_preferences = load_preferences(m_preferences_path);
 
         apply_style();
 
@@ -551,6 +561,8 @@ namespace Hsdbg
 
     auto Ui::draw(Debugger& debugger) -> void
     {
+        apply_preferences();
+
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
 
         ImGui::SetNextWindowPos(viewport->WorkPos);
@@ -609,6 +621,8 @@ namespace Hsdbg
 
         if (m_visible.demo)
             ImGui::ShowDemoWindow(&m_visible.demo);
+
+        draw_preferences_window();
 
         // a window claims its tab when it is first submitted, so this can only be
         // asked for once every panel in the node exists
@@ -690,6 +704,10 @@ namespace Hsdbg
 
             ImGui::Separator();
 
+            ImGui::MenuItem("preferences...", nullptr, &m_show_preferences);
+
+            ImGui::Separator();
+
             if (ImGui::MenuItem("quit", "cmd+q"))
                 m_window->set_should_close(true);
 
@@ -711,11 +729,14 @@ namespace Hsdbg
 
             ImGui::Separator();
 
+            const StepMode step_mode =
+                m_preferences.step_by_instruction ? StepMode::Instruction : StepMode::Line;
+
             if (ImGui::MenuItem("step over", "f10", false, has_target))
-                report(debugger.step_over(), "step over");
+                report(debugger.step_over(step_mode), "step over");
 
             if (ImGui::MenuItem("step into", "f11", false, has_target))
-                report(debugger.step_into(), "step into");
+                report(debugger.step_into(step_mode), "step into");
 
             if (ImGui::MenuItem("step out", "shift+f11", false, has_target))
                 report(debugger.step_out(), "step out");
@@ -766,8 +787,9 @@ namespace Hsdbg
         }
 
         const float button_height = ImGui::GetFrameHeight();
-        const bool has_mascot = m_mascot.valid() && m_mascot.height() > 0.0f;
-        const float mascot_height = has_mascot ? button_height * 1.6f : 0.0f;
+        const bool has_mascot = m_preferences.show_mascot && m_mascot.valid() &&
+                                m_mascot.height() > 0.0f;
+        const float mascot_height = has_mascot ? button_height * m_preferences.mascot_scale : 0.0f;
         const float row_height = std::max(button_height, mascot_height);
 
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 6.0f));
@@ -777,11 +799,15 @@ namespace Hsdbg
         const float row_top = ImGui::GetCursorPosY();
         ImGui::SetCursorPosY(row_top + (row_height - button_height) * 0.5f);
 
+        const StepMode step_mode =
+            m_preferences.step_by_instruction ? StepMode::Instruction : StepMode::Line;
+
         ImGui::BeginDisabled(!has_target || running);
         if (ImGui::Button("run"))
         {
             LaunchSpec spec;
             spec.executable = debugger.target_path();
+            spec.stop_at_entry = m_preferences.stop_at_entry;
 
             report(debugger.launch(spec), "run");
         }
@@ -805,12 +831,12 @@ namespace Hsdbg
         ImGui::SameLine();
 
         if (ImGui::Button("step over"))
-            report(debugger.step_over(), "step over");
+            report(debugger.step_over(step_mode), "step over");
 
         ImGui::SameLine();
 
         if (ImGui::Button("step into"))
-            report(debugger.step_into(), "step into");
+            report(debugger.step_into(step_mode), "step into");
 
         ImGui::SameLine();
 
@@ -875,11 +901,15 @@ namespace Hsdbg
 
         ImGui::Text("%zu breakpoints", debugger.breakpoints().size());
 
-        const std::string frame_stats = std::format("{:.1f} fps", ImGui::GetIO().Framerate);
-        const float text_width = ImGui::CalcTextSize(frame_stats.c_str()).x;
+        if (m_preferences.show_fps)
+        {
+            const std::string frame_stats = std::format("{:.1f} fps", ImGui::GetIO().Framerate);
+            const float text_width = ImGui::CalcTextSize(frame_stats.c_str()).x;
 
-        ImGui::SameLine(ImGui::GetContentRegionMax().x - text_width - ImGui::GetStyle().ItemSpacing.x);
-        ImGui::TextDisabled("%s", frame_stats.c_str());
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - text_width -
+                            ImGui::GetStyle().ItemSpacing.x);
+            ImGui::TextDisabled("%s", frame_stats.c_str());
+        }
     }
 
     auto Ui::draw_load_target_popup(Debugger& debugger) -> void
@@ -926,6 +956,182 @@ namespace Hsdbg
             ImGui::CloseCurrentPopup();
 
         ImGui::EndPopup();
+    }
+
+    auto Ui::apply_preferences() -> void
+    {
+        // FontScaleMain re-rasterizes the vector font crisply, unlike the legacy
+        // FontGlobalScale which just stretched the baked atlas
+        ImGui::GetStyle().FontScaleMain = m_preferences.ui_scale;
+
+        m_source_view.set_highlighting(m_preferences.syntax_highlighting);
+        m_source_view.set_line_numbers(m_preferences.show_line_numbers);
+        m_source_view.set_highlight_current_line(m_preferences.highlight_current_line);
+
+        const auto pack = [](const float c[3]) {
+            return IM_COL32(static_cast<int>(c[0] * 255.0f), static_cast<int>(c[1] * 255.0f),
+                            static_cast<int>(c[2] * 255.0f), 255);
+        };
+        m_source_view.set_syntax_color(1, pack(m_preferences.color_keyword));
+        m_source_view.set_syntax_color(2, pack(m_preferences.color_type));
+        m_source_view.set_syntax_color(3, pack(m_preferences.color_string));
+        m_source_view.set_syntax_color(4, pack(m_preferences.color_number));
+        m_source_view.set_syntax_color(5, pack(m_preferences.color_comment));
+        m_source_view.set_syntax_color(6, pack(m_preferences.color_preprocessor));
+        m_source_view.set_current_line_color(pack(m_preferences.color_current_line));
+
+        // the theme colours and rounding only need rebuilding when they change
+        if (m_restyle_pending)
+        {
+            apply_style();
+            m_restyle_pending = false;
+        }
+    }
+
+    auto Ui::draw_preferences_window() -> void
+    {
+        if (!m_show_preferences)
+            return;
+
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        const ImVec2 center(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                            viewport->WorkPos.y + viewport->WorkSize.y * 0.5f);
+
+        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(560.0f, 380.0f), ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(460.0f, 300.0f), ImVec2(FLT_MAX, FLT_MAX));
+
+        if (!ImGui::Begin("preferences", &m_show_preferences, ImGuiWindowFlags_NoDocking))
+        {
+            ImGui::End();
+            return;
+        }
+
+        static constexpr const char* CATEGORIES[] = { "appearance", "editor", "debugger" };
+        bool changed = false;
+        bool restyle = false;
+
+        const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
+
+        // left: the category list; right: that category's settings
+        ImGui::BeginChild("##pref_categories", ImVec2(150.0f, -footer), ImGuiChildFlags_Borders);
+        for (int index = 0; index < IM_ARRAYSIZE(CATEGORIES); ++index)
+        {
+            if (ImGui::Selectable(CATEGORIES[index], m_preferences_tab == index))
+                m_preferences_tab = index;
+        }
+        ImGui::EndChild();
+
+        ImGui::SameLine();
+
+        ImGui::BeginChild("##pref_content", ImVec2(0.0f, -footer));
+        ImGui::PushItemWidth(-150.0f);
+
+        const auto help = [](const char* text) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::BeginItemTooltip())
+            {
+                ImGui::PushTextWrapPos(ImGui::GetFontSize() * 20.0f);
+                ImGui::TextUnformatted(text);
+                ImGui::PopTextWrapPos();
+                ImGui::EndTooltip();
+            }
+        };
+
+        const auto accent_swatch = [&](const char* label, float (&value)[3]) {
+            if (ImGui::ColorEdit3(label, value,
+                                  ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoAlpha))
+                changed = true;
+        };
+
+        if (m_preferences_tab == 0)
+        {
+            ImGui::SeparatorText("interface");
+            changed |= ImGui::SliderFloat("ui scale", &m_preferences.ui_scale, 0.75f, 2.0f, "%.2fx");
+            help("scales every font. the text stays crisp because it is re-rasterized, not stretched.");
+
+            if (ImGui::ColorEdit3("accent colour", m_preferences.accent,
+                                  ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoAlpha))
+            {
+                changed = true;
+                restyle = true;
+            }
+
+            if (ImGui::SliderFloat("corner rounding", &m_preferences.rounding, 0.0f, 12.0f, "%.0f px"))
+            {
+                changed = true;
+                restyle = true;
+            }
+
+            changed |= ImGui::Checkbox("show fps in the status bar", &m_preferences.show_fps);
+
+            ImGui::SeparatorText("layout");
+            if (ImGui::Button("reset window layout"))
+                m_layout_built = false;
+            help("restores the default arrangement of all the docked panels.");
+
+            ImGui::SeparatorText("mascot");
+            changed |= ImGui::Checkbox("show the crying pepe", &m_preferences.show_mascot);
+
+            ImGui::BeginDisabled(!m_preferences.show_mascot);
+            changed |= ImGui::SliderFloat("pepe size", &m_preferences.mascot_scale, 1.0f, 3.0f, "%.1fx");
+            ImGui::EndDisabled();
+        }
+        else if (m_preferences_tab == 1)
+        {
+            ImGui::SeparatorText("source view");
+            changed |= ImGui::Checkbox("syntax highlighting", &m_preferences.syntax_highlighting);
+            changed |= ImGui::Checkbox("show line numbers", &m_preferences.show_line_numbers);
+            changed |= ImGui::Checkbox("highlight the current line",
+                                       &m_preferences.highlight_current_line);
+
+            ImGui::SeparatorText("colours");
+            ImGui::BeginDisabled(!m_preferences.syntax_highlighting);
+            accent_swatch("keyword", m_preferences.color_keyword);
+            accent_swatch("type", m_preferences.color_type);
+            accent_swatch("string", m_preferences.color_string);
+            accent_swatch("number", m_preferences.color_number);
+            accent_swatch("comment", m_preferences.color_comment);
+            accent_swatch("preprocessor", m_preferences.color_preprocessor);
+            ImGui::EndDisabled();
+            accent_swatch("current line", m_preferences.color_current_line);
+        }
+        else if (m_preferences_tab == 2)
+        {
+            ImGui::SeparatorText("launching");
+            changed |= ImGui::Checkbox("break at entry point on launch", &m_preferences.stop_at_entry);
+            help("stop on the very first instruction instead of running to your breakpoints.");
+
+            ImGui::SeparatorText("stepping");
+            changed |= ImGui::Checkbox("step by instruction, not line",
+                                       &m_preferences.step_by_instruction);
+            help("the step over/into buttons advance one machine instruction at a time.");
+        }
+
+        ImGui::PopItemWidth();
+        ImGui::EndChild();
+
+        ImGui::Separator();
+
+        if (ImGui::Button("reset to defaults"))
+        {
+            m_preferences = Preferences{};
+            changed = true;
+            restyle = true;
+        }
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("saved to %s", m_preferences_path.filename().string().c_str());
+
+        // persist the moment anything changes, so nothing is lost to a crash
+        if (changed)
+            save_preferences(m_preferences_path, m_preferences);
+
+        if (restyle)
+            m_restyle_pending = true;
+
+        ImGui::End();
     }
 
     auto Ui::draw_source_panel(Debugger& debugger) -> void
@@ -1517,13 +1723,15 @@ namespace Hsdbg
     {
         ImGuiStyle& style = ImGui::GetStyle();
 
-        style.WindowRounding = 4.0f;
-        style.ChildRounding = 4.0f;
-        style.FrameRounding = 4.0f;
-        style.PopupRounding = 4.0f;
-        style.ScrollbarRounding = 6.0f;
-        style.GrabRounding = 4.0f;
-        style.TabRounding = 4.0f;
+        const float radius = m_preferences.rounding;
+
+        style.WindowRounding = radius;
+        style.ChildRounding = radius;
+        style.FrameRounding = radius;
+        style.PopupRounding = radius;
+        style.ScrollbarRounding = radius + 2.0f;
+        style.GrabRounding = radius;
+        style.TabRounding = radius;
 
         style.WindowBorderSize = 1.0f;
         style.FrameBorderSize = 0.0f;
@@ -1534,6 +1742,24 @@ namespace Hsdbg
         style.GrabMinSize = 9.0f;
         style.WindowTitleAlign = ImVec2(0.0f, 0.5f);
         style.SeparatorTextBorderSize = 1.0f;
+
+        // the accent is user-chosen; the hover/active shades are blended from it
+        // toward the button base so any colour stays coherent across the theme
+        const ImVec4 accent(m_preferences.accent[0], m_preferences.accent[1],
+                            m_preferences.accent[2], 1.0f);
+        const ImVec4 base(0.18f, 0.18f, 0.22f, 1.0f);
+
+        const auto mix = [](ImVec4 from, ImVec4 to, float t) {
+            return ImVec4(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t,
+                          from.z + (to.z - from.z) * t, 1.0f);
+        };
+        const auto fade = [](ImVec4 colour, float alpha) {
+            return ImVec4(colour.x, colour.y, colour.z, alpha);
+        };
+
+        const ImVec4 accent_bright = mix(accent, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), 0.14f);
+        const ImVec4 accent_hover = mix(base, accent, 0.42f);
+        const ImVec4 accent_active = mix(base, accent, 0.68f);
 
         ImVec4* colors = style.Colors;
 
@@ -1555,35 +1781,35 @@ namespace Hsdbg
         colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.24f, 0.24f, 0.29f, 1.00f);
         colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.30f, 0.30f, 0.36f, 1.00f);
         colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.36f, 0.36f, 0.43f, 1.00f);
-        colors[ImGuiCol_CheckMark] = ImVec4(0.30f, 0.72f, 0.78f, 1.00f);
-        colors[ImGuiCol_SliderGrab] = ImVec4(0.30f, 0.72f, 0.78f, 1.00f);
-        colors[ImGuiCol_SliderGrabActive] = ImVec4(0.38f, 0.80f, 0.86f, 1.00f);
-        colors[ImGuiCol_Button] = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
-        colors[ImGuiCol_ButtonHovered] = ImVec4(0.24f, 0.40f, 0.44f, 1.00f);
-        colors[ImGuiCol_ButtonActive] = ImVec4(0.28f, 0.52f, 0.58f, 1.00f);
+        colors[ImGuiCol_CheckMark] = accent;
+        colors[ImGuiCol_SliderGrab] = accent;
+        colors[ImGuiCol_SliderGrabActive] = accent_bright;
+        colors[ImGuiCol_Button] = base;
+        colors[ImGuiCol_ButtonHovered] = accent_hover;
+        colors[ImGuiCol_ButtonActive] = accent_active;
         colors[ImGuiCol_Header] = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
-        colors[ImGuiCol_HeaderHovered] = ImVec4(0.24f, 0.40f, 0.44f, 1.00f);
-        colors[ImGuiCol_HeaderActive] = ImVec4(0.28f, 0.52f, 0.58f, 1.00f);
+        colors[ImGuiCol_HeaderHovered] = accent_hover;
+        colors[ImGuiCol_HeaderActive] = accent_active;
         colors[ImGuiCol_Separator] = ImVec4(0.20f, 0.20f, 0.24f, 1.00f);
-        colors[ImGuiCol_SeparatorHovered] = ImVec4(0.30f, 0.72f, 0.78f, 0.60f);
-        colors[ImGuiCol_SeparatorActive] = ImVec4(0.30f, 0.72f, 0.78f, 1.00f);
+        colors[ImGuiCol_SeparatorHovered] = fade(accent, 0.60f);
+        colors[ImGuiCol_SeparatorActive] = accent;
         colors[ImGuiCol_ResizeGrip] = ImVec4(0.24f, 0.24f, 0.29f, 1.00f);
-        colors[ImGuiCol_ResizeGripHovered] = ImVec4(0.30f, 0.72f, 0.78f, 0.60f);
-        colors[ImGuiCol_ResizeGripActive] = ImVec4(0.30f, 0.72f, 0.78f, 1.00f);
+        colors[ImGuiCol_ResizeGripHovered] = fade(accent, 0.60f);
+        colors[ImGuiCol_ResizeGripActive] = accent;
         colors[ImGuiCol_Tab] = ImVec4(0.11f, 0.11f, 0.14f, 1.00f);
-        colors[ImGuiCol_TabHovered] = ImVec4(0.24f, 0.40f, 0.44f, 1.00f);
-        colors[ImGuiCol_TabSelected] = ImVec4(0.18f, 0.30f, 0.34f, 1.00f);
-        colors[ImGuiCol_TabSelectedOverline] = ImVec4(0.30f, 0.72f, 0.78f, 1.00f);
+        colors[ImGuiCol_TabHovered] = accent_hover;
+        colors[ImGuiCol_TabSelected] = mix(base, accent, 0.30f);
+        colors[ImGuiCol_TabSelectedOverline] = accent;
         colors[ImGuiCol_TabDimmed] = ImVec4(0.09f, 0.09f, 0.11f, 1.00f);
-        colors[ImGuiCol_TabDimmedSelected] = ImVec4(0.14f, 0.20f, 0.22f, 1.00f);
-        colors[ImGuiCol_DockingPreview] = ImVec4(0.30f, 0.72f, 0.78f, 0.50f);
+        colors[ImGuiCol_TabDimmedSelected] = mix(ImVec4(0.14f, 0.14f, 0.17f, 1.0f), accent, 0.16f);
+        colors[ImGuiCol_DockingPreview] = fade(accent, 0.50f);
         colors[ImGuiCol_DockingEmptyBg] = ImVec4(0.07f, 0.07f, 0.09f, 1.00f);
         colors[ImGuiCol_TableHeaderBg] = ImVec4(0.14f, 0.14f, 0.17f, 1.00f);
         colors[ImGuiCol_TableBorderStrong] = ImVec4(0.20f, 0.20f, 0.24f, 1.00f);
         colors[ImGuiCol_TableBorderLight] = ImVec4(0.16f, 0.16f, 0.19f, 1.00f);
         colors[ImGuiCol_TableRowBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
         colors[ImGuiCol_TableRowBgAlt] = ImVec4(1.00f, 1.00f, 1.00f, 0.02f);
-        colors[ImGuiCol_TextSelectedBg] = ImVec4(0.30f, 0.72f, 0.78f, 0.35f);
-        colors[ImGuiCol_NavCursor] = ImVec4(0.30f, 0.72f, 0.78f, 1.00f);
+        colors[ImGuiCol_TextSelectedBg] = fade(accent, 0.35f);
+        colors[ImGuiCol_NavCursor] = accent;
     }
 }

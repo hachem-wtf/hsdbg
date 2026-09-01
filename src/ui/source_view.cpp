@@ -20,23 +20,6 @@ namespace Hsdbg
     {
         constexpr float BREAKPOINT_RADIUS = 5.0f;
 
-        // a dark palette in the spirit of the source view's existing greens; the
-        // default kind carries no colour so ordinary text keeps the theme's own
-        auto color_of(SyntaxKind kind) -> ImU32
-        {
-            switch (kind)
-            {
-                case SyntaxKind::Keyword:      return IM_COL32(86, 156, 214, 255);
-                case SyntaxKind::Type:         return IM_COL32(78, 201, 176, 255);
-                case SyntaxKind::String:       return IM_COL32(206, 145, 120, 255);
-                case SyntaxKind::Number:       return IM_COL32(181, 206, 168, 255);
-                case SyntaxKind::Comment:      return IM_COL32(106, 153, 85, 255);
-                case SyntaxKind::Preprocessor: return IM_COL32(197, 134, 192, 255);
-                case SyntaxKind::Default:      break;
-            }
-
-            return 0;
-        }
 
         enum class Language : uint8_t
         {
@@ -333,7 +316,6 @@ namespace Hsdbg
         const ImU32 BREAKPOINT_COLOR = IM_COL32(226, 84, 84, 255);
         const ImU32 BREAKPOINT_DISABLED_COLOR = IM_COL32(120, 90, 90, 255);
         const ImU32 BREAKPOINT_HOVER_COLOR = IM_COL32(226, 84, 84, 90);
-        const ImU32 HIGHLIGHT_COLOR = IM_COL32(58, 72, 46, 255);
 
         auto line_number_width(size_t line_count) -> float
         {
@@ -432,7 +414,7 @@ namespace Hsdbg
     auto SourceView::draw_lines(Debugger& debugger) -> void
     {
         const float text_height = ImGui::GetTextLineHeightWithSpacing();
-        const float number_width = line_number_width(m_lines.size());
+        const float number_width = m_line_numbers ? line_number_width(m_lines.size()) : 0.0f;
 
         ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
@@ -459,12 +441,12 @@ namespace Hsdbg
                 const uint32_t line_number = static_cast<uint32_t>(index) + 1;
                 const ImVec2 row_start = ImGui::GetCursorScreenPos();
 
-                if (line_number == m_highlighted_line)
+                if (line_number == m_highlighted_line && m_highlight_current_line)
                 {
                     draw_list->AddRectFilled(row_start,
                                              ImVec2(row_start.x + ImGui::GetContentRegionAvail().x,
                                                     row_start.y + text_height),
-                                             HIGHLIGHT_COLOR);
+                                             m_current_line_color);
                 }
 
                 ImGui::PushID(index);
@@ -522,18 +504,22 @@ namespace Hsdbg
                     draw_list->AddCircleFilled(marker_center, BREAKPOINT_RADIUS, BREAKPOINT_HOVER_COLOR);
                 }
 
-                const std::string number_text = std::to_string(line_number);
+                if (m_line_numbers)
+                {
+                    const std::string number_text = std::to_string(line_number);
 
-                ImGui::SameLine(0.0f, 0.0f);
-                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + number_width -
-                                     ImGui::CalcTextSize(number_text.c_str()).x);
-                ImGui::TextDisabled("%s", number_text.c_str());
+                    ImGui::SameLine(0.0f, 0.0f);
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + number_width -
+                                         ImGui::CalcTextSize(number_text.c_str()).x);
+                    ImGui::TextDisabled("%s", number_text.c_str());
+                }
 
                 ImGui::SameLine(0.0f, GUTTER_MARGIN * 2.0f);
 
                 const std::string& text = m_lines[static_cast<size_t>(index)];
 
-                if (!m_highlight || m_spans[static_cast<size_t>(index)].empty())
+                if (!m_highlight || !m_highlighting_enabled ||
+                    m_spans[static_cast<size_t>(index)].empty())
                 {
                     ImGui::TextUnformatted(text.c_str());
                 }
@@ -557,7 +543,8 @@ namespace Hsdbg
                         }
                         else
                         {
-                            ImGui::PushStyleColor(ImGuiCol_Text, color_of(span.kind));
+                            ImGui::PushStyleColor(ImGuiCol_Text,
+                                                  m_syntax_colors[static_cast<size_t>(span.kind)]);
                             ImGui::TextUnformatted(begin, end);
                             ImGui::PopStyleColor();
                         }

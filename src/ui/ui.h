@@ -3,6 +3,7 @@
 #include "core/result.h"
 #include "ui/animated_image.h"
 #include "ui/image_renderer.h"
+#include "ui/preferences.h"
 #include "ui/source_view.h"
 
 #include <cstdint>
@@ -58,6 +59,8 @@ namespace Hsdbg
         auto draw_toolbar(Debugger& debugger) -> void;
         auto draw_status_bar(Debugger& debugger) -> void;
         auto draw_load_target_popup(Debugger& debugger) -> void;
+        auto draw_preferences_window() -> void;
+        auto apply_preferences() -> void;
 
         auto draw_source_panel(Debugger& debugger) -> void;
         auto draw_breakpoints_panel(Debugger& debugger) -> void;
@@ -80,6 +83,12 @@ namespace Hsdbg
         Window* m_window = nullptr;
         SourceView m_source_view;
         PanelVisibility m_visible;
+
+        Preferences m_preferences;
+        std::filesystem::path m_preferences_path;
+        bool m_show_preferences = false;
+        bool m_restyle_pending = false;
+        int m_preferences_tab = 0;
 
         // the crying-pepe that lives in the toolbar; loaded on the first frame
         // once there is a gl context to upload its textures to, and drawn with a
