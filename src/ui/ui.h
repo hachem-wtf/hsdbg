@@ -4,6 +4,7 @@
 #include "ui/animated_image.h"
 #include "ui/image_renderer.h"
 #include "ui/preferences.h"
+#include "ui/profiler.h"
 #include "ui/source_view.h"
 
 #include <cstdint>
@@ -49,6 +50,7 @@ namespace Hsdbg
             bool symbols = true;
             bool disassembly = true;
             bool console = true;
+            bool profiler = true;
             bool demo = false;
         };
 
@@ -72,6 +74,7 @@ namespace Hsdbg
         auto draw_symbols_panel(Debugger& debugger) -> void;
         auto draw_disassembly_panel(Debugger& debugger) -> void;
         auto draw_console_panel(Debugger& debugger) -> void;
+        auto draw_profiler_panel(Debugger& debugger) -> void;
 
         auto push_console(std::string line) -> void;
         auto report(const Result<void>& result, std::string_view action) -> void;
@@ -82,6 +85,7 @@ namespace Hsdbg
 
         Window* m_window = nullptr;
         SourceView m_source_view;
+        Profiler m_profiler;
         PanelVisibility m_visible;
 
         Preferences m_preferences;
@@ -109,6 +113,7 @@ namespace Hsdbg
         std::string m_target_input;
         std::string m_symbol_filter;
         std::string m_source_filter;
+        std::string m_trace_input;
 
         uint64_t m_followed_stop = 0;
         std::filesystem::path m_followed_target;

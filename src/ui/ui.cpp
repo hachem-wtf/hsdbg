@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cfloat>
 #include <filesystem>
 #include <format>
 #include <span>
@@ -36,6 +37,7 @@ namespace Hsdbg
         constexpr const char* PANEL_SYMBOLS = "symbols";
         constexpr const char* PANEL_DISASSEMBLY = "disassembly";
         constexpr const char* PANEL_CONSOLE = "console";
+        constexpr const char* PANEL_PROFILER = "profiler";
 
         constexpr const char* LOAD_TARGET_POPUP = "load target";
 
@@ -563,6 +565,9 @@ namespace Hsdbg
     {
         apply_preferences();
 
+        m_profiler.sample_frame(ImGui::GetIO().DeltaTime);
+        m_profiler.sample_target(debugger.resident_memory(), debugger.has_target());
+
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
 
         ImGui::SetNextWindowPos(viewport->WorkPos);
@@ -618,6 +623,7 @@ namespace Hsdbg
         draw_symbols_panel(debugger);
         draw_disassembly_panel(debugger);
         draw_console_panel(debugger);
+        draw_profiler_panel(debugger);
 
         if (m_visible.demo)
             ImGui::ShowDemoWindow(&m_visible.demo);
@@ -680,6 +686,7 @@ namespace Hsdbg
         ImGui::DockBuilderDockWindow(PANEL_REGISTERS, right_bottom_id);
         ImGui::DockBuilderDockWindow(PANEL_BREAKPOINTS, bottom_id);
         ImGui::DockBuilderDockWindow(PANEL_CONSOLE, bottom_id);
+        ImGui::DockBuilderDockWindow(PANEL_PROFILER, bottom_id);
 
         ImGui::DockBuilderFinish(dockspace_id);
     }
@@ -761,6 +768,7 @@ namespace Hsdbg
             ImGui::MenuItem(PANEL_SYMBOLS, nullptr, &m_visible.symbols);
             ImGui::MenuItem(PANEL_DISASSEMBLY, nullptr, &m_visible.disassembly);
             ImGui::MenuItem(PANEL_CONSOLE, nullptr, &m_visible.console);
+            ImGui::MenuItem(PANEL_PROFILER, nullptr, &m_visible.profiler);
 
             ImGui::Separator();
 
@@ -1695,6 +1703,125 @@ namespace Hsdbg
 
                 m_console_input.clear();
                 ImGui::SetKeyboardFocusHere(-1);
+            }
+        }
+
+        ImGui::End();
+    }
+
+    auto Ui::draw_profiler_panel(Debugger& debugger) -> void
+    {
+        if (!m_visible.profiler)
+            return;
+
+        if (ImGui::Begin(PANEL_PROFILER, &m_visible.profiler))
+        {
+            bool paused = m_profiler.paused();
+            if (ImGui::Checkbox("pause", &paused))
+                m_profiler.set_paused(paused);
+
+            ImGui::SameLine();
+            if (ImGui::Button("reset"))
+                m_profiler.reset();
+
+            ImGui::Separator();
+
+            if (!debugger.has_target())
+            {
+                ImGui::TextDisabled("no target: load and run a process to profile it");
+            }
+            else
+            {
+                const TimeSeries& memory = m_profiler.target_memory_mb();
+
+                const std::string memory_overlay =
+                    std::format("{:.1f} MB  (peak {:.1f})", memory.latest(), memory.maximum());
+
+                ImGui::TextUnformatted("resident memory");
+                ImGui::PlotLines("##target_memory", memory.values(), memory.count(), memory.offset(),
+                                 memory_overlay.c_str(), 0.0f, FLT_MAX, ImVec2(-1.0f, 90.0f));
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("function tracing");
+
+            ImGui::SetNextItemWidth(-70.0f);
+            const bool submitted = ImGui::InputTextWithHint("##trace_input", "function to time",
+                                                            &m_trace_input,
+                                                            ImGuiInputTextFlags_EnterReturnsTrue);
+
+            ImGui::SameLine();
+            const bool add_clicked = ImGui::Button("trace", ImVec2(-1.0f, 0.0f));
+
+            if ((submitted || add_clicked) && !m_trace_input.empty())
+            {
+                debugger.add_trace(m_trace_input);
+                m_trace_input.clear();
+            }
+
+            const std::span<const FunctionTrace> traces = debugger.traces();
+
+            if (traces.empty())
+            {
+                ImGui::TextDisabled("no traced functions yet");
+            }
+            else
+            {
+                constexpr ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                                  ImGuiTableFlags_SizingStretchProp;
+
+                if (ImGui::BeginTable("##traces", 3, flags))
+                {
+                    ImGui::TableSetupColumn("function");
+                    ImGui::TableSetupColumn("calls", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+                    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+                    ImGui::TableHeadersRow();
+
+                    uint32_t remove_id = 0;
+
+                    for (const FunctionTrace& trace : traces)
+                    {
+                        ImGui::TableNextRow();
+
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(trace.function.c_str());
+
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%llu", static_cast<unsigned long long>(trace.call_count));
+
+                        ImGui::TableNextColumn();
+                        ImGui::PushID(static_cast<int>(trace.id));
+                        if (ImGui::SmallButton("x"))
+                            remove_id = trace.id;
+                        ImGui::PopID();
+                    }
+
+                    ImGui::EndTable();
+
+                    if (remove_id != 0)
+                        debugger.remove_trace(remove_id);
+                }
+            }
+
+            if (ImGui::CollapsingHeader("debugger self-timing"))
+            {
+                const TimeSeries& frame_ms = m_profiler.frame_times();
+                const TimeSeries& fps = m_profiler.frame_rates();
+
+                const std::string frame_overlay =
+                    std::format("{:.2f} ms  (avg {:.2f}  peak {:.2f})",
+                                frame_ms.latest(), frame_ms.average(), frame_ms.maximum());
+
+                ImGui::TextUnformatted("frame time");
+                ImGui::PlotLines("##frame_ms", frame_ms.values(), frame_ms.count(), frame_ms.offset(),
+                                 frame_overlay.c_str(), 0.0f, FLT_MAX, ImVec2(-1.0f, 70.0f));
+
+                const std::string fps_overlay =
+                    std::format("{:.0f} fps  (avg {:.0f})", fps.latest(), fps.average());
+
+                ImGui::TextUnformatted("frame rate");
+                ImGui::PlotLines("##fps", fps.values(), fps.count(), fps.offset(),
+                                 fps_overlay.c_str(), 0.0f, FLT_MAX, ImVec2(-1.0f, 70.0f));
             }
         }
 

@@ -3,6 +3,7 @@
 #include "core/result.h"
 #include "debugger/types.h"
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -52,6 +53,13 @@ namespace Hsdbg
         auto find_breakpoint(uint32_t id) -> Breakpoint*;
         auto breakpoints() const -> std::span<const Breakpoint> { return m_breakpoints; }
 
+        // function tracing: time how long each call of a named function takes by
+        // recording entry and return without stopping the ui
+        auto add_trace(std::string_view function) -> uint32_t;
+        auto remove_trace(uint32_t id) -> bool;
+        auto clear_traces() -> void;
+        auto traces() const -> std::span<const FunctionTrace> { return m_traces; }
+
         // inspection
         auto threads() const -> std::span<const Thread> { return m_threads; }
         auto call_stack() const -> std::span<const StackFrame> { return m_call_stack; }
@@ -64,6 +72,10 @@ namespace Hsdbg
         auto evaluate(std::string_view expression) -> Result<std::string>;
         auto read_memory(uint64_t address, size_t size) -> Result<std::vector<uint8_t>>;
         auto console_output() const -> std::span<const std::string> { return m_console_output; }
+
+        // resident set size of the debugged process in bytes, refreshed once a
+        // frame while a target is alive and zero otherwise
+        auto resident_memory() const -> uint64_t { return m_resident_memory; }
 
         // selection, what the ui is currently looking at
         auto select_thread(uint64_t thread_id) -> bool;
@@ -110,6 +122,14 @@ namespace Hsdbg
         auto refresh_source_files() -> void;
         auto refresh_disassembly() -> void;
         auto load_disassembly(uint64_t file_address) -> void;
+        auto sample_process_stats() -> void;
+
+        auto resolve_trace(FunctionTrace& trace) -> void;
+
+        // called for a stop that trace breakpoints took part in; returns true when
+        // the stop was purely for tracing and the process was resumed
+        auto handle_trace_stop() -> bool;
+        auto trace_now() const -> double;
 
         std::unique_ptr<Session> m_session;
 
@@ -121,6 +141,9 @@ namespace Hsdbg
 
         std::vector<Breakpoint> m_breakpoints;
         uint32_t m_next_breakpoint_id = 1;
+
+        std::vector<FunctionTrace> m_traces;
+        uint32_t m_next_trace_id = 1;
 
         std::vector<Thread> m_threads;
         std::vector<StackFrame> m_call_stack;
@@ -136,5 +159,8 @@ namespace Hsdbg
         uint32_t m_selected_frame = 0;
         uint64_t m_selected_symbol = 0;
         uint64_t m_stop_count = 0;
+        uint64_t m_resident_memory = 0;
+
+        std::chrono::steady_clock::time_point m_trace_epoch = std::chrono::steady_clock::now();
     };
 }

@@ -158,4 +158,23 @@ namespace Hsdbg
         uint64_t address = 0;
         uint64_t size = 0;
     };
+
+    // one recorded activation of a traced function: when it was entered and how
+    // long it took. duration stays zero until the matching return is seen
+    struct TraceCall
+    {
+        double start = 0.0;    // seconds since tracing began
+        double duration = 0.0; // seconds spent inside the call
+    };
+
+    // a function the user asked to time. the debugger sets an internal breakpoint
+    // on it that records each call without stopping the ui
+    struct FunctionTrace
+    {
+        uint32_t id = 0;
+        std::string function;
+        int32_t entry_backend_id = 0;
+        uint64_t call_count = 0;
+        std::vector<TraceCall> calls;
+    };
 }

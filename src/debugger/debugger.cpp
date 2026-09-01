@@ -15,6 +15,9 @@
 // no standard way to read or write the environment
 #include <cstdlib>
 
+// resident memory of the debugged process, read straight from the kernel
+#include <libproc.h>
+
 namespace Hsdbg
 {
     namespace
@@ -22,6 +25,10 @@ namespace Hsdbg
 #ifndef HSDBG_LLVM_PREFIX
     #define HSDBG_LLVM_PREFIX ""
 #endif
+
+        // how many individual calls a single trace keeps before it stops growing;
+        // the counters keep climbing, only the per-call history is bounded
+        constexpr size_t MAX_TRACE_CALLS = 200000;
 
         auto set_environment(const char* name, const std::string& value) -> void
         {
@@ -735,6 +742,14 @@ namespace Hsdbg
         m_process_id = process.GetProcessID();
         m_stop_reason = StopReason::None;
 
+        // each run is timed from its own start, so drop whatever the last run left
+        m_trace_epoch = std::chrono::steady_clock::now();
+        for (FunctionTrace& trace : m_traces)
+        {
+            trace.call_count = 0;
+            trace.calls.clear();
+        }
+
         Log::info("debugger: launched '{}' as pid {}",
                   m_target_path.filename().string(),
                   m_process_id);
@@ -1247,6 +1262,165 @@ namespace Hsdbg
     {
         pump_events();
         sync_breakpoints();
+        sample_process_stats();
+    }
+
+    auto Debugger::sample_process_stats() -> void
+    {
+        if (!is_alive(m_session->process))
+        {
+            m_resident_memory = 0;
+            return;
+        }
+
+        rusage_info_v2 usage{};
+        if (proc_pid_rusage(static_cast<int>(m_process_id), RUSAGE_INFO_V2,
+                            reinterpret_cast<rusage_info_t*>(&usage)) == 0)
+        {
+            m_resident_memory = usage.ri_resident_size;
+        }
+    }
+
+    auto Debugger::trace_now() const -> double
+    {
+        const auto elapsed = std::chrono::steady_clock::now() - m_trace_epoch;
+        return std::chrono::duration<double>(elapsed).count();
+    }
+
+    auto Debugger::add_trace(std::string_view function) -> uint32_t
+    {
+        const auto existing = std::ranges::find_if(m_traces, [&](const FunctionTrace& candidate)
+        {
+            return candidate.function == function;
+        });
+
+        if (existing != m_traces.end())
+            return existing->id;
+
+        FunctionTrace trace;
+        trace.id = m_next_trace_id++;
+        trace.function = function;
+
+        m_traces.push_back(std::move(trace));
+        resolve_trace(m_traces.back());
+
+        Log::info("debugger: tracing {}()", m_traces.back().function);
+
+        return m_traces.back().id;
+    }
+
+    auto Debugger::resolve_trace(FunctionTrace& trace) -> void
+    {
+        if (!m_session->target.IsValid())
+            return;
+
+        // scoped to the executable so a bare name does not also catch the same
+        // symbol pulled in from a shared library
+        lldb::SBBreakpoint created = m_session->target.BreakpointCreateByName(
+            trace.function.c_str(), m_session->target.GetExecutable().GetFilename());
+
+        if (!created.IsValid() || created.GetNumLocations() == 0)
+        {
+            Log::warn("debugger: could not trace {}()", trace.function);
+            return;
+        }
+
+        created.SetEnabled(true);
+        trace.entry_backend_id = created.GetID();
+
+        Log::debug("debugger: trace on {}() ({} locations)",
+                   trace.function, created.GetNumLocations());
+    }
+
+    auto Debugger::remove_trace(uint32_t id) -> bool
+    {
+        const auto entry = std::ranges::find(m_traces, id, &FunctionTrace::id);
+        if (entry == m_traces.end())
+            return false;
+
+        if (entry->entry_backend_id != 0 && m_session->target.IsValid())
+            m_session->target.BreakpointDelete(entry->entry_backend_id);
+
+        m_traces.erase(entry);
+        return true;
+    }
+
+    auto Debugger::clear_traces() -> void
+    {
+        if (m_session->target.IsValid())
+        {
+            for (const FunctionTrace& trace : m_traces)
+            {
+                if (trace.entry_backend_id != 0)
+                    m_session->target.BreakpointDelete(trace.entry_backend_id);
+            }
+        }
+
+        m_traces.clear();
+    }
+
+    auto Debugger::handle_trace_stop() -> bool
+    {
+        if (m_traces.empty())
+            return false;
+
+        bool any_trace = false;
+        bool any_other = false;
+
+        const uint32_t thread_count = m_session->process.GetNumThreads();
+
+        for (uint32_t index = 0; index < thread_count; ++index)
+        {
+            lldb::SBThread thread = m_session->process.GetThreadAtIndex(index);
+            if (!thread.IsValid())
+                continue;
+
+            const lldb::StopReason reason = thread.GetStopReason();
+
+            if (reason == lldb::eStopReasonBreakpoint)
+            {
+                // the stop reason carries (breakpoint id, location id) pairs
+                const size_t pairs = thread.GetStopReasonDataCount() / 2;
+
+                for (size_t pair = 0; pair < pairs; ++pair)
+                {
+                    const auto backend_id =
+                        static_cast<int32_t>(thread.GetStopReasonDataAtIndex(pair * 2));
+
+                    const auto trace = std::ranges::find(m_traces, backend_id,
+                                                         &FunctionTrace::entry_backend_id);
+
+                    if (trace != m_traces.end() && backend_id != 0)
+                    {
+                        trace->call_count += 1;
+
+                        if (trace->calls.size() < MAX_TRACE_CALLS)
+                            trace->calls.push_back(TraceCall{ trace_now(), 0.0 });
+
+                        any_trace = true;
+                    }
+                    else
+                    {
+                        // a real breakpoint the user set
+                        any_other = true;
+                    }
+                }
+            }
+            else if (reason != lldb::eStopReasonNone && reason != lldb::eStopReasonInvalid)
+            {
+                // a signal, exception or completed step: a genuine stop
+                any_other = true;
+            }
+        }
+
+        // only slip the process back into motion when nothing but tracing happened
+        if (any_trace && !any_other)
+        {
+            m_session->process.Continue();
+            return true;
+        }
+
+        return false;
     }
 
     auto Debugger::require_stopped() const -> Result<void>
@@ -1320,7 +1494,14 @@ namespace Hsdbg
                 // else is lldb repeating one that was already handled
                 case lldb::eStateStopped:
                     if (m_state != TargetState::Stopped)
+                    {
+                        // a trace-only stop records the call and resumes without
+                        // ever surfacing to the user as a stop
+                        if (handle_trace_stop())
+                            break;
+
                         on_stopped();
+                    }
 
                     break;
 
