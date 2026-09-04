@@ -18,7 +18,7 @@ namespace Hsdbg
 
         glfwSetErrorCallback(on_error);
 
-        const bool initialized = glfwInit() == GLFW_TRUE;
+        [[maybe_unused]] const bool initialized = glfwInit() == GLFW_TRUE;
         HSDBG_ASSERT(initialized, "failed to initialize glfw");
 
         Log::info("glfw {}", glfwGetVersionString());

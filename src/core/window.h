@@ -34,7 +34,7 @@ namespace Hsdbg
         auto swap_buffers() -> void;
 
         auto set_vsync(bool enabled) -> void;
-        auto set_title(std::string_view title) -> void;
+        auto set_title(std::string_view window_title) -> void;
 
         auto handle() const -> GLFWwindow* { return m_handle; }
         auto title() const -> const std::string& { return m_title; }

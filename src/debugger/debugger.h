@@ -35,7 +35,7 @@ namespace Hsdbg
         auto load_target(const std::filesystem::path& executable) -> Result<void>;
         auto unload_target() -> void;
         auto launch(const LaunchSpec& spec) -> Result<void>;
-        auto attach(uint64_t process_id) -> Result<void>;
+        auto attach(uint64_t pid) -> Result<void>;
         auto detach() -> Result<void>;
         auto terminate() -> Result<void>;
 
@@ -128,7 +128,7 @@ namespace Hsdbg
         // keeps the lldb headers out of everything that talks to the debugger
         struct Session;
 
-        auto set_state(TargetState state) -> void;
+        auto set_state(TargetState next_state) -> void;
         auto resolve_breakpoint(Breakpoint& breakpoint) -> void;
         auto sync_breakpoints() -> void;
 

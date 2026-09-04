@@ -50,7 +50,7 @@ namespace Hsdbg
         auto target_memory_mb() const -> const TimeSeries& { return m_target_memory_mb; }
 
         auto paused() const -> bool { return m_paused; }
-        auto set_paused(bool paused) -> void { m_paused = paused; }
+        auto set_paused(bool value) -> void { m_paused = value; }
 
     private:
         TimeSeries m_frame_ms;

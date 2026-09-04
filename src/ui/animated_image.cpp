@@ -130,25 +130,25 @@ namespace Hsdbg
         }
 
         const auto length = static_cast<int>(bytes.size());
-        int width = 0;
-        int height = 0;
+        int pixel_width = 0;
+        int pixel_height = 0;
         int comp = 0;
 
         int frames = 0;
         int* delays = nullptr;
 
         if (stbi_uc* data = stbi_load_gif_from_memory(bytes.data(), length, &delays,
-                                                      &width, &height, &frames, &comp, 4))
+                                                      &pixel_width, &pixel_height, &frames, &comp, 4))
         {
-            m_width = width;
-            m_height = height;
+            m_width = pixel_width;
+            m_height = pixel_height;
 
             for (int index = 0; index < frames; ++index)
             {
-                stbi_uc* frame = data + static_cast<std::size_t>(index) * width * height * 4;
+                stbi_uc* frame = data + static_cast<std::size_t>(index) * pixel_width * pixel_height * 4;
 
-                bleed_edges(frame, width, height);
-                m_frames.push_back(upload(frame, width, height));
+                bleed_edges(frame, pixel_width, pixel_height);
+                m_frames.push_back(upload(frame, pixel_width, pixel_height));
 
                 const float seconds = delays != nullptr
                                           ? static_cast<float>(delays[index]) / 1000.0f
@@ -161,12 +161,12 @@ namespace Hsdbg
             std::free(delays);
         }
         else if (stbi_uc* still = stbi_load_from_memory(bytes.data(), length,
-                                                        &width, &height, &comp, 4))
+                                                        &pixel_width, &pixel_height, &comp, 4))
         {
-            m_width = width;
-            m_height = height;
-            bleed_edges(still, width, height);
-            m_frames.push_back(upload(still, width, height));
+            m_width = pixel_width;
+            m_height = pixel_height;
+            bleed_edges(still, pixel_width, pixel_height);
+            m_frames.push_back(upload(still, pixel_width, pixel_height));
             m_delays.push_back(MIN_FRAME_SECONDS);
             stbi_image_free(still);
         }

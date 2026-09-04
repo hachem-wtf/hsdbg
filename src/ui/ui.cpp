@@ -73,21 +73,21 @@ namespace Hsdbg
         // the dim connectors drawn between a folder and its children
         const ImU32 SOURCE_TREE_LINE_COLOR = IM_COL32(110, 110, 122, 160);
 
-        auto breakpoint_at(Debugger& debugger, const Instruction& instruction) -> const Breakpoint*
+        auto breakpoint_at(const Debugger& debugger, const Instruction& instruction) -> const Breakpoint*
         {
-            for (const Breakpoint& candidate : debugger.breakpoints())
+            const std::span<const Breakpoint> breakpoints = debugger.breakpoints();
+            const auto found = std::ranges::find_if(breakpoints, [&](const Breakpoint& candidate)
             {
                 if (instruction.file_address != 0 &&
                     candidate.file_address == instruction.file_address)
                 {
-                    return &candidate;
+                    return true;
                 }
 
-                if (candidate.address != 0 && candidate.address == instruction.address)
-                    return &candidate;
-            }
+                return candidate.address != 0 && candidate.address == instruction.address;
+            });
 
-            return nullptr;
+            return found != breakpoints.end() ? &*found : nullptr;
         }
 
         auto toggle_instruction_breakpoint(Debugger& debugger, const Instruction& instruction) -> void
@@ -128,11 +128,10 @@ namespace Hsdbg
 
         auto find_or_add_child(std::vector<SourceNode>& nodes, std::string_view name) -> SourceNode&
         {
-            for (SourceNode& node : nodes)
-            {
-                if (node.name == name)
-                    return node;
-            }
+            const auto existing = std::ranges::find(nodes, name, &SourceNode::name);
+
+            if (existing != nodes.end())
+                return *existing;
 
             nodes.push_back({ std::string(name), {}, {} });
             return nodes.back();
@@ -242,19 +241,20 @@ namespace Hsdbg
 
         auto preferred_source(std::span<const std::filesystem::path> files) -> std::filesystem::path
         {
-            for (const std::filesystem::path& file : files)
+            const auto named_main = std::ranges::find_if(files, [](const std::filesystem::path& file)
             {
-                if (file.stem() == "main" && std::filesystem::exists(file))
-                    return file;
-            }
+                return file.stem() == "main" && std::filesystem::exists(file);
+            });
 
-            for (const std::filesystem::path& file : files)
+            if (named_main != files.end())
+                return *named_main;
+
+            const auto existing = std::ranges::find_if(files, [](const std::filesystem::path& file)
             {
-                if (std::filesystem::exists(file))
-                    return file;
-            }
+                return std::filesystem::exists(file);
+            });
 
-            return {};
+            return existing != files.end() ? *existing : std::filesystem::path{};
         }
 
         auto draw_instruction_table(Debugger& debugger,
@@ -913,7 +913,7 @@ namespace Hsdbg
         ImGui::PopStyleVar(2);
     }
 
-    auto Ui::draw_status_bar(Debugger& debugger) -> void
+    auto Ui::draw_status_bar(const Debugger& debugger) -> void
     {
         ImGui::Separator();
 
@@ -1376,7 +1376,7 @@ namespace Hsdbg
         ImGui::End();
     }
 
-    auto Ui::draw_source_tree_panel(Debugger& debugger) -> void
+    auto Ui::draw_source_tree_panel(const Debugger& debugger) -> void
     {
         if (!m_visible.source_tree)
             return;
@@ -1485,7 +1485,7 @@ namespace Hsdbg
         ImGui::End();
     }
 
-    auto Ui::draw_locals_panel(Debugger& debugger) -> void
+    auto Ui::draw_locals_panel(const Debugger& debugger) -> void
     {
         if (!m_visible.locals)
             return;
@@ -1520,7 +1520,7 @@ namespace Hsdbg
         ImGui::End();
     }
 
-    auto Ui::draw_registers_panel(Debugger& debugger) -> void
+    auto Ui::draw_registers_panel(const Debugger& debugger) -> void
     {
         if (!m_visible.registers)
             return;
@@ -1944,8 +1944,8 @@ namespace Hsdbg
                 ImGui::InvisibleButton("##timeline_canvas", ImVec2(canvas_w, canvas_h));
                 const bool canvas_hovered = ImGui::IsItemHovered();
 
-                ImDrawList* draw = ImGui::GetWindowDrawList();
-                draw->PushClipRect(origin, ImVec2(origin.x + canvas_w, origin.y + canvas_h), true);
+                ImDrawList* draw_list = ImGui::GetWindowDrawList();
+                draw_list->PushClipRect(origin, ImVec2(origin.x + canvas_w, origin.y + canvas_h), true);
 
                 const float scale = canvas_w / static_cast<float>(range); // pixels per second
                 const float baseline = origin.y + canvas_h;               // row 0 rests on the bottom
@@ -1961,15 +1961,15 @@ namespace Hsdbg
 
                     const ImU32 fill = ImColor::HSV(span.trace_id * 0.13f, 0.55f, 0.78f);
 
-                    draw->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + width, y1), fill, 2.0f);
-                    draw->AddRect(ImVec2(x0, y0), ImVec2(x0 + width, y1), IM_COL32(0, 0, 0, 90), 2.0f);
+                    draw_list->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + width, y1), fill, 2.0f);
+                    draw_list->AddRect(ImVec2(x0, y0), ImVec2(x0 + width, y1), IM_COL32(0, 0, 0, 90), 2.0f);
 
                     if (width > 24.0f)
                     {
-                        draw->PushClipRect(ImVec2(x0 + 2.0f, y0), ImVec2(x0 + width - 2.0f, y1), true);
-                        draw->AddText(ImVec2(x0 + 4.0f, y0 + 2.0f), IM_COL32(20, 20, 20, 255),
+                        draw_list->PushClipRect(ImVec2(x0 + 2.0f, y0), ImVec2(x0 + width - 2.0f, y1), true);
+                        draw_list->AddText(ImVec2(x0 + 4.0f, y0 + 2.0f), IM_COL32(20, 20, 20, 255),
                                       name_of(span.trace_id));
-                        draw->PopClipRect();
+                        draw_list->PopClipRect();
                     }
 
                     const bool over = canvas_hovered && mouse.x >= x0 && mouse.x <= x0 + width &&
@@ -1988,7 +1988,7 @@ namespace Hsdbg
                     }
                 }
 
-                draw->PopClipRect();
+                draw_list->PopClipRect();
             }
         }
 

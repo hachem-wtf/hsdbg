@@ -1,5 +1,7 @@
 #include "ui/profiler.h"
 
+#include <numeric>
+
 namespace Hsdbg
 {
     auto TimeSeries::push(float value) -> void
@@ -32,9 +34,7 @@ namespace Hsdbg
         if (m_count == 0)
             return 0.0f;
 
-        float sum = 0.0f;
-        for (int i = 0; i < m_count; ++i)
-            sum += m_values[i];
+        const float sum = std::accumulate(m_values.begin(), m_values.begin() + m_count, 0.0f);
 
         return sum / static_cast<float>(m_count);
     }

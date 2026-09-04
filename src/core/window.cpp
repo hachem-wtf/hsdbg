@@ -106,9 +106,9 @@ namespace Hsdbg
         m_vsync = enabled;
     }
 
-    auto Window::set_title(std::string_view title) -> void
+    auto Window::set_title(std::string_view window_title) -> void
     {
-        m_title = title;
+        m_title = window_title;
         glfwSetWindowTitle(m_handle, m_title.c_str());
     }
 

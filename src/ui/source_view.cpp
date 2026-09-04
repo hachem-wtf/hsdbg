@@ -11,6 +11,7 @@
 #include <cctype>
 #include <fstream>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <unordered_set>
 
@@ -91,13 +92,10 @@ namespace Hsdbg
 
         auto only_space_before(const std::string& line, uint32_t upto) -> bool
         {
-            for (uint32_t index = 0; index < upto; ++index)
+            return std::ranges::all_of(line.begin(), line.begin() + upto, [](char character)
             {
-                if (std::isspace(static_cast<unsigned char>(line[index])) == 0)
-                    return false;
-            }
-
-            return true;
+                return std::isspace(static_cast<unsigned char>(character)) != 0;
+            });
         }
 
         // splits every line into contiguous coloured spans. the whole file is
@@ -372,11 +370,11 @@ namespace Hsdbg
         }
     }
 
-    auto SourceView::open(const std::filesystem::path& path) -> Result<void>
+    auto SourceView::open(const std::filesystem::path& file_path) -> Result<void>
     {
-        std::ifstream file(path);
+        std::ifstream file(file_path);
         if (!file.is_open())
-            return fail("could not open '{}'", path.string());
+            return fail("could not open '{}'", file_path.string());
 
         std::vector<std::string> lines;
         std::string line;
@@ -389,9 +387,9 @@ namespace Hsdbg
             lines.push_back(std::move(line));
         }
 
-        const std::optional<Language> language = language_of(path);
+        const std::optional<Language> language = language_of(file_path);
 
-        m_path = path;
+        m_path = file_path;
         m_lines = std::move(lines);
         m_highlight = language.has_value();
 
@@ -400,11 +398,11 @@ namespace Hsdbg
         m_macros.clear();
 
         if (language == Language::Cpp)
-            m_macros.build(m_lines, path.parent_path());
+            m_macros.build(m_lines, file_path.parent_path());
 
         m_spans = language ? highlight_lines(m_lines, *language, m_macros)
                            : std::vector<std::vector<SourceSpan>>{};
-        m_path_input = path.string();
+        m_path_input = file_path.string();
         m_error.clear();
         m_highlighted_line = 0;
 
@@ -519,16 +517,12 @@ namespace Hsdbg
 
                 if (ImGui::InvisibleButton("##gutter", ImVec2(GUTTER_WIDTH, text_height)))
                 {
-                    const Breakpoint* existing = nullptr;
-
-                    for (const Breakpoint& breakpoint : debugger.breakpoints())
+                    const std::span<const Breakpoint> breakpoints = debugger.breakpoints();
+                    const auto found = std::ranges::find_if(breakpoints, [&](const Breakpoint& candidate)
                     {
-                        if (breakpoint.file == m_path && breakpoint.line == line_number)
-                        {
-                            existing = &breakpoint;
-                            break;
-                        }
-                    }
+                        return candidate.file == m_path && candidate.line == line_number;
+                    });
+                    const Breakpoint* existing = found != breakpoints.end() ? &*found : nullptr;
 
                     if (existing != nullptr)
                         debugger.remove_breakpoint(existing->id);
@@ -540,16 +534,12 @@ namespace Hsdbg
 
                 ImGui::PopID();
 
-                const Breakpoint* breakpoint = nullptr;
-
-                for (const Breakpoint& candidate : debugger.breakpoints())
+                const std::span<const Breakpoint> breakpoints = debugger.breakpoints();
+                const auto found = std::ranges::find_if(breakpoints, [&](const Breakpoint& candidate)
                 {
-                    if (candidate.file == m_path && candidate.line == line_number)
-                    {
-                        breakpoint = &candidate;
-                        break;
-                    }
-                }
+                    return candidate.file == m_path && candidate.line == line_number;
+                });
+                const Breakpoint* breakpoint = found != breakpoints.end() ? &*found : nullptr;
 
                 const ImVec2 marker_center(row_start.x + GUTTER_WIDTH * 0.5f,
                                            row_start.y + text_height * 0.5f);

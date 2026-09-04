@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <iterator>
 
 namespace Hsdbg
 {
@@ -111,15 +112,17 @@ namespace Hsdbg
                 "^=", "++", "--", ".*",
             };
 
-            for (const std::string_view op : multis)
+            const auto multi = std::ranges::find_if(multis, [&](std::string_view op)
             {
-                if (text.compare(at, op.size(), op) == 0)
-                {
-                    at += op.size();
-                    token.kind = PpKind::Punct;
-                    token.text = std::string(op);
-                    return token;
-                }
+                return text.compare(at, op.size(), op) == 0;
+            });
+
+            if (multi != std::end(multis))
+            {
+                at += multi->size();
+                token.kind = PpKind::Punct;
+                token.text = std::string(*multi);
+                return token;
             }
 
             token.kind = PpKind::Punct;
@@ -508,8 +511,11 @@ namespace Hsdbg
                 ArgList expanded_args;
                 expanded_args.reserve(args.size());
 
-                for (const std::vector<PpToken>& arg : args)
-                    expanded_args.push_back(expand_full(table, arg));
+                std::ranges::transform(args, std::back_inserter(expanded_args),
+                                       [&](const std::vector<PpToken>& arg)
+                                       {
+                                           return expand_full(table, arg);
+                                       });
 
                 std::vector<PpToken> repl = substitute(*def, args, expanded_args);
 

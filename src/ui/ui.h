@@ -30,7 +30,7 @@ namespace Hsdbg
         auto operator=(const Ui&) -> Ui& = delete;
         auto operator=(Ui&&) -> Ui& = delete;
 
-        auto begin_frame() -> void;
+        static auto begin_frame() -> void;
         auto draw(Debugger& debugger) -> void;
         auto end_frame() -> void;
 
@@ -57,11 +57,11 @@ namespace Hsdbg
         };
 
         auto apply_style() -> void;
-        auto build_default_layout(uint32_t dockspace_id) -> void;
+        static auto build_default_layout(uint32_t dockspace_id) -> void;
 
         auto draw_menu_bar(Debugger& debugger) -> void;
         auto draw_toolbar(Debugger& debugger) -> void;
-        auto draw_status_bar(Debugger& debugger) -> void;
+        auto draw_status_bar(const Debugger& debugger) -> void;
         auto draw_load_target_popup(Debugger& debugger) -> void;
         auto draw_preferences_window() -> void;
         auto apply_preferences() -> void;
@@ -70,9 +70,9 @@ namespace Hsdbg
         auto draw_breakpoints_panel(Debugger& debugger) -> void;
         auto draw_call_stack_panel(Debugger& debugger) -> void;
         auto draw_threads_panel(Debugger& debugger) -> void;
-        auto draw_source_tree_panel(Debugger& debugger) -> void;
-        auto draw_locals_panel(Debugger& debugger) -> void;
-        auto draw_registers_panel(Debugger& debugger) -> void;
+        auto draw_source_tree_panel(const Debugger& debugger) -> void;
+        auto draw_locals_panel(const Debugger& debugger) -> void;
+        auto draw_registers_panel(const Debugger& debugger) -> void;
         auto draw_symbols_panel(Debugger& debugger) -> void;
         auto draw_disassembly_panel(Debugger& debugger) -> void;
         auto draw_console_panel(Debugger& debugger) -> void;

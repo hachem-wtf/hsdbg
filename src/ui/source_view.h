@@ -39,7 +39,7 @@ namespace Hsdbg
     class SourceView
     {
     public:
-        auto open(const std::filesystem::path& path) -> Result<void>;
+        auto open(const std::filesystem::path& file_path) -> Result<void>;
         auto close() -> void;
 
         auto draw(Debugger& debugger) -> void;

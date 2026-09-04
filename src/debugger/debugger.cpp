@@ -9,6 +9,7 @@
 #include <array>
 #include <cctype>
 #include <cstdio>
+#include <iterator>
 #include <set>
 #include <source_location>
 
@@ -69,6 +70,10 @@ namespace Hsdbg
         {
             const std::vector<std::filesystem::path> candidates = debug_server_candidates();
 
+            // on windows the list is empty by design and this returns before the
+            // warning below; cppcheck only sees the platform it runs on, where the
+            // list is never empty
+            // cppcheck-suppress knownConditionTrueFalse
             if (candidates.empty())
                 return;
 
@@ -182,7 +187,7 @@ namespace Hsdbg
             return std::filesystem::path(buffer.data());
         }
 
-        auto read_back(lldb::SBTarget& target, lldb::SBBreakpoint& source, Breakpoint& breakpoint) -> void
+        auto read_back(const lldb::SBTarget& target, lldb::SBBreakpoint& source, Breakpoint& breakpoint) -> void
         {
             breakpoint.enabled = source.IsEnabled();
             breakpoint.hit_count = source.GetHitCount();
@@ -289,7 +294,7 @@ namespace Hsdbg
             return thread.GetFrameAtIndex(frame_index);
         }
 
-        auto instruction_of(lldb::SBTarget& target,
+        auto instruction_of(const lldb::SBTarget& target,
                             lldb::SBInstruction source,
                             lldb::addr_t program_counter) -> Instruction
         {
@@ -313,7 +318,7 @@ namespace Hsdbg
             return entry;
         }
 
-        auto instructions_of(lldb::SBTarget& target,
+        auto instructions_of(const lldb::SBTarget& target,
                              lldb::SBInstructionList source,
                              lldb::addr_t program_counter) -> std::vector<Instruction>
         {
@@ -684,8 +689,8 @@ namespace Hsdbg
         std::vector<const char*> arguments;
         arguments.reserve(spec.arguments.size() + 1);
 
-        for (const std::string& argument : spec.arguments)
-            arguments.push_back(argument.c_str());
+        std::ranges::transform(spec.arguments, std::back_inserter(arguments),
+                               [](const std::string& argument) { return argument.c_str(); });
 
         arguments.push_back(nullptr);
 
@@ -697,8 +702,8 @@ namespace Hsdbg
             std::vector<const char*> environment;
             environment.reserve(spec.environment.size() + 1);
 
-            for (const std::string& entry : spec.environment)
-                environment.push_back(entry.c_str());
+            std::ranges::transform(spec.environment, std::back_inserter(environment),
+                                   [](const std::string& entry) { return entry.c_str(); });
 
             environment.push_back(nullptr);
 
@@ -786,7 +791,7 @@ namespace Hsdbg
         return {};
     }
 
-    auto Debugger::attach(uint64_t process_id) -> Result<void>
+    auto Debugger::attach(uint64_t pid) -> Result<void>
     {
         if (is_alive(m_session->process))
             return fail("already attached to pid {}", m_process_id);
@@ -800,7 +805,7 @@ namespace Hsdbg
                 return fail("could not create a target to attach with");
         }
 
-        lldb::SBAttachInfo info(static_cast<lldb::pid_t>(process_id));
+        lldb::SBAttachInfo info(static_cast<lldb::pid_t>(pid));
         info.SetListener(m_session->listener);
 
         set_state(TargetState::Launching);
@@ -813,7 +818,7 @@ namespace Hsdbg
             set_state(m_target_path.empty() ? TargetState::NoTarget : TargetState::Loaded);
 
             return fail("could not attach to pid {}: {}",
-                        process_id,
+                        pid,
                         message_of(error, "unknown error"));
         }
 
@@ -1794,8 +1799,8 @@ namespace Hsdbg
     auto Debugger::take_sample_and_resume() -> bool
     {
         // a real breakpoint landing at the same time is a genuine stop, not a sample
-        const uint32_t threads = m_session->process.GetNumThreads();
-        for (uint32_t index = 0; index < threads; ++index)
+        const uint32_t thread_count = m_session->process.GetNumThreads();
+        for (uint32_t index = 0; index < thread_count; ++index)
         {
             lldb::SBThread thread = m_session->process.GetThreadAtIndex(index);
             if (thread.IsValid() && thread.GetStopReason() == lldb::eStopReasonBreakpoint)
@@ -1810,11 +1815,11 @@ namespace Hsdbg
     auto Debugger::take_sample() -> void
     {
         const double now = trace_now();
-        const uint32_t threads = m_session->process.GetNumThreads();
+        const uint32_t thread_count = m_session->process.GetNumThreads();
 
         std::vector<uint32_t> stack;
 
-        for (uint32_t index = 0; index < threads; ++index)
+        for (uint32_t index = 0; index < thread_count; ++index)
         {
             lldb::SBThread thread = m_session->process.GetThreadAtIndex(index);
             if (!thread.IsValid())
@@ -2448,13 +2453,13 @@ namespace Hsdbg
         }
     }
 
-    auto Debugger::set_state(TargetState state) -> void
+    auto Debugger::set_state(TargetState next_state) -> void
     {
-        if (m_state == state)
+        if (m_state == next_state)
             return;
 
-        Log::debug("debugger: {} -> {}", to_string(m_state), to_string(state));
+        Log::debug("debugger: {} -> {}", to_string(m_state), to_string(next_state));
 
-        m_state = state;
+        m_state = next_state;
     }
 }

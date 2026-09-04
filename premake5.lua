@@ -306,22 +306,32 @@ newaction {
     description = "Run static analysis with cppcheck",
 
     execute = function()
-        local result = os.execute("make clean")
+        -- clean the same configuration we are about to build, otherwise its
+        -- objects stay up to date, the build below compiles nothing, and bear
+        -- captures an empty compile_commands.json
+        local result = os.execute("make clean config=dist")
 
         if result ~= true and result ~= 0 then
             error("Failed to clean project")
         end
 
-        result = os.execute("bear -- make config=debug")
+        -- analyze the dist configuration: it drops the debug-only asserts and
+        -- sanitizers, so cppcheck sees the code as it actually ships and catches
+        -- issues the debug build hides (e.g. variables only read by an assert)
+        result = os.execute("bear -- make config=dist")
 
         if result ~= true and result ~= 0 then
             error("Failed to generate compile_commands.json")
         end
 
+        -- only our own code is in scope: skip the vendored translation units and
+        -- drop any finding that lands in a third-party header our sources include
         result = os.execute(
             "cppcheck " ..
             "--project=compile_commands.json " ..
-            "--file-filter=src/** " ..
+            "-i ext " ..
+            "--suppress='*:ext/*' " ..
+            "--inline-suppr " ..
             "--enable=warning,style,performance,portability " ..
             "--error-exitcode=1"
         )
