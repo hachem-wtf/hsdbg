@@ -274,12 +274,12 @@ namespace Hsdbg
                             macros.find(word) != nullptr)
                             kind = SyntaxKind::Macro;
 
-                        if (kind != SyntaxKind::Default)
-                        {
-                            flush_default(start);
-                            emit(start, at - start, kind);
-                            run = at;
-                        }
+                        // every word gets its own span, including plain identifiers:
+                        // isolating them lets the source view hit-test a name under
+                        // the cursor and show its live value
+                        flush_default(start);
+                        emit(start, at - start, kind);
+                        run = at;
 
                         continue;
                     }
@@ -324,9 +324,62 @@ namespace Hsdbg
         const ImU32 BREAKPOINT_DISABLED_COLOR = IM_COL32(120, 90, 90, 255);
         const ImU32 BREAKPOINT_HOVER_COLOR = IM_COL32(226, 84, 84, 90);
 
+        // muted blue-grey for the live values shown after a line, distinct from the
+        // green of comments so they do not read as part of the code
+        const ImU32 INLINE_VALUE_COLOR = IM_COL32(122, 140, 170, 235);
+
         auto line_number_width(size_t line_count) -> float
         {
             return ImGui::CalcTextSize(std::to_string(line_count).c_str()).x;
+        }
+
+        // the frame local named exactly `word`, or null; only names with a value to
+        // show qualify, so pure aggregates without a summary are skipped
+        auto find_local(std::span<const Variable> locals, std::string_view word) -> const Variable*
+        {
+            const auto match = std::ranges::find_if(locals, [&](const Variable& local)
+            {
+                return !local.value.empty() && local.name == word;
+            });
+
+            return match != locals.end() ? &*match : nullptr;
+        }
+
+        // whether `name` appears in `line` as a whole identifier rather than as a
+        // fragment of a longer word
+        auto contains_word(const std::string& line, const std::string& name) -> bool
+        {
+            if (name.empty())
+                return false;
+
+            for (size_t at = line.find(name); at != std::string::npos; at = line.find(name, at + 1))
+            {
+                const bool left = at > 0 && is_word(line[at - 1]);
+                const bool right = at + name.size() < line.size() && is_word(line[at + name.size()]);
+
+                if (!left && !right)
+                    return true;
+            }
+
+            return false;
+        }
+
+        // a single-line, length-capped rendering of a value for the inline annotation
+        auto inline_value(const Variable& local) -> std::string
+        {
+            std::string text = local.name + " = " + local.value;
+
+            if (const auto newline = text.find('\n'); newline != std::string::npos)
+                text.resize(newline);
+
+            constexpr size_t cap = 48;
+            if (text.size() > cap)
+            {
+                text.resize(cap - 3);
+                text += "...";
+            }
+
+            return text;
         }
 
         // grab a macro invocation out of a line starting at the name: the name
@@ -430,6 +483,13 @@ namespace Hsdbg
         return request;
     }
 
+    auto SourceView::take_watch_request() -> std::optional<std::string>
+    {
+        std::optional<std::string> request = std::move(m_watch_request);
+        m_watch_request.reset();
+        return request;
+    }
+
     auto SourceView::set_highlighted_line(uint32_t line) -> void
     {
         m_highlighted_line = line;
@@ -494,6 +554,13 @@ namespace Hsdbg
                               ImGui::GetWindowHeight() * 0.4f);
             m_scroll_to_highlight = false;
         }
+
+        // the selected frame's locals, but only when we are stopped in this very
+        // file (a non-zero highlight means show_frame put us here); used both to
+        // annotate lines and to answer a hover over a name
+        const std::span<const Variable> locals =
+            (debugger.is_stopped() && m_highlighted_line != 0) ? debugger.locals()
+                                                               : std::span<const Variable>{};
 
         ImGuiListClipper clipper;
         clipper.Begin(static_cast<int>(m_lines.size()), text_height);
@@ -596,6 +663,23 @@ namespace Hsdbg
                         if (span.kind == SyntaxKind::Default)
                         {
                             ImGui::TextUnformatted(begin, end);
+
+                            const std::string_view word(begin, static_cast<size_t>(end - begin));
+                            const bool is_name = !word.empty() && is_word_start(word.front());
+
+                            // hovering a name that is a live local shows its value
+                            if (!locals.empty() && ImGui::IsItemHovered())
+                            {
+                                if (const Variable* local = find_local(locals, word))
+                                    ImGui::SetTooltip("%s = %s%s%s", local->name.c_str(),
+                                                      local->value.c_str(),
+                                                      local->type.empty() ? "" : "\n",
+                                                      local->type.c_str());
+                            }
+
+                            // right-click any name to add it to the watch list
+                            if (is_name && ImGui::IsItemClicked(ImGuiMouseButton_Right))
+                                m_watch_request = std::string(word);
                         }
                         else if (span.kind == SyntaxKind::Macro)
                         {
@@ -608,6 +692,34 @@ namespace Hsdbg
                             ImGui::TextUnformatted(begin, end);
                             ImGui::PopStyleColor();
                         }
+                    }
+                }
+
+                // trailing live values: the locals that appear on this line, shown
+                // only up to the line the pc sits on, since anything past it has
+                // not run yet and would read as a stale or unset value
+                if (!locals.empty() && line_number <= m_highlighted_line)
+                {
+                    int shown = 0;
+
+                    for (const Variable& local : locals)
+                    {
+                        if (shown >= 4)
+                            break;
+
+                        if (local.value.empty() || !contains_word(text, local.name))
+                            continue;
+
+                        ImGui::SameLine(0.0f, shown == 0 ? GUTTER_MARGIN * 3.0f : GUTTER_MARGIN);
+                        ImGui::PushStyleColor(ImGuiCol_Text, INLINE_VALUE_COLOR);
+                        ImGui::TextUnformatted(inline_value(local).c_str());
+                        ImGui::PopStyleColor();
+
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s = %s%s%s", local.name.c_str(), local.value.c_str(),
+                                              local.type.empty() ? "" : "\n", local.type.c_str());
+
+                        ++shown;
                     }
                 }
             }

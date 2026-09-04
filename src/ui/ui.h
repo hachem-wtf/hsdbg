@@ -46,18 +46,27 @@ namespace Hsdbg
             bool threads = true;
             bool source_tree = true;
             bool locals = true;
+            bool watch = true;
             bool registers = true;
             bool symbols = true;
             bool disassembly = true;
             bool console = true;
-            bool profiler = true;
-            bool timeline = true;
-            bool macros = true;
+
+            // these two are not standing panels: they earn their place only once
+            // there is something to show. the profiler opens when you go to profile
+            // (its flame chart, timings and graphs all live inside it), the macros
+            // view when you unroll a macro from source
+            bool profiler = false;
+            bool macros = false;
             bool demo = false;
         };
 
         auto apply_style() -> void;
         static auto build_default_layout(uint32_t dockspace_id) -> void;
+
+        // a fuzzy omnibar (cmd/ctrl+k) over files, symbols and execution commands,
+        // so navigating and driving the target never means hunting for a panel
+        auto draw_command_palette(Debugger& debugger) -> void;
 
         auto draw_menu_bar(Debugger& debugger) -> void;
         auto draw_toolbar(Debugger& debugger) -> void;
@@ -72,12 +81,20 @@ namespace Hsdbg
         auto draw_threads_panel(Debugger& debugger) -> void;
         auto draw_source_tree_panel(const Debugger& debugger) -> void;
         auto draw_locals_panel(const Debugger& debugger) -> void;
+        auto draw_watch_panel(Debugger& debugger) -> void;
         auto draw_registers_panel(const Debugger& debugger) -> void;
+
+        // adds an expression to the watch list and evaluates it right away if the
+        // target is stopped, so it never shows a blank until the next stop
+        auto add_watch(Debugger& debugger, std::string expression) -> void;
         auto draw_symbols_panel(Debugger& debugger) -> void;
         auto draw_disassembly_panel(Debugger& debugger) -> void;
         auto draw_console_panel(Debugger& debugger) -> void;
         auto draw_profiler_panel(Debugger& debugger) -> void;
-        auto draw_timeline_panel(Debugger& debugger) -> void;
+
+        // the call flame chart, the hero of the profiler panel: draws into whatever
+        // region the caller has opened, no window of its own
+        static auto draw_flamegraph(const Debugger& debugger) -> void;
         auto draw_macros_panel(Debugger& debugger) -> void;
 
         auto push_console(std::string line) -> void;
@@ -85,6 +102,11 @@ namespace Hsdbg
 
         auto follow_stop(Debugger& debugger) -> void;
         auto follow_target(Debugger& debugger) -> void;
+
+        // selects the innermost frame that has source and shows it, so a new
+        // thread or stop lands the whole ui on real code rather than a runtime
+        // internal frame with nothing to display
+        auto follow_selected_frame(Debugger& debugger) -> void;
         auto show_frame(const StackFrame& frame) -> void;
 
         Window* m_window = nullptr;
@@ -119,6 +141,33 @@ namespace Hsdbg
         std::string m_source_filter;
         std::string m_trace_input;
 
+        // one user-entered watch expression and its last evaluation
+        struct Watch
+        {
+            std::string expression;
+            std::string value;
+            bool ok = false;
+        };
+
+        std::vector<Watch> m_watches;
+        std::string m_watch_input;
+
+        // the (stop, thread, frame) the watches were last evaluated against, so
+        // they re-run when execution stops again or the selection moves, but not
+        // every frame (each evaluation jits code into the target)
+        uint64_t m_watch_stop = 0;
+        uint64_t m_watch_thread = 0;
+        uint32_t m_watch_frame = 0;
+        bool m_watch_evaluated = false;
+
+        // command palette: whether it is up, a one-shot request to grab the text
+        // field's focus, the query, and which result the keyboard has landed on
+        bool m_palette_open = false;
+        bool m_palette_request = false;
+        bool m_palette_focus = false;
+        std::string m_palette_query;
+        int m_palette_selection = 0;
+
         // macros panel: the invocation being unrolled, the current unroll depth,
         // and the read-only buffer that shows the tokens at that depth
         std::string m_macro_input;
@@ -128,12 +177,21 @@ namespace Hsdbg
         uint64_t m_followed_stop = 0;
         std::filesystem::path m_followed_target;
 
+        // the source file whose folder chain the tree last expanded; when the
+        // open file moves away from it the tree reveals the new path once
+        std::filesystem::path m_revealed_source;
+
+        // rising-edge latch so the profiler surfaces itself the first time there is
+        // profiling activity, without fighting the user if they then close it
+        bool m_profiler_revealed = false;
+
         bool m_layout_built = false;
         bool m_select_default_tabs = false;
         bool m_console_scroll_pending = false;
         bool m_load_target_pending = false;
         bool m_focus_breakpoints = false;
         bool m_focus_macros = false;
+        bool m_focus_profiler = false;
         bool m_focus_symbols = false;
         bool m_focus_disassembly = false;
         bool m_scroll_to_program_counter = false;

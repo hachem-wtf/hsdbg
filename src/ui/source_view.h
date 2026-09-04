@@ -66,6 +66,10 @@ namespace Hsdbg
         // hand to the macros panel; cleared once taken
         auto take_macro_request() -> std::optional<std::string>;
 
+        // right-clicking a name in the source stashes it here for the ui to add to
+        // the watch list; cleared once taken
+        auto take_watch_request() -> std::optional<std::string>;
+
     private:
         auto draw_open_bar() -> void;
         auto draw_lines(Debugger& debugger) -> void;
@@ -80,6 +84,7 @@ namespace Hsdbg
         std::vector<std::vector<SourceSpan>> m_spans;
         MacroTable m_macros;
         std::optional<std::string> m_macro_request;
+        std::optional<std::string> m_watch_request;
         bool m_highlight = false;
         bool m_highlighting_enabled = true;
         bool m_line_numbers = true;

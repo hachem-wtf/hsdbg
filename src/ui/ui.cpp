@@ -34,12 +34,12 @@ namespace Hsdbg
         constexpr const char* PANEL_THREADS = "threads";
         constexpr const char* PANEL_SOURCE_TREE = "source tree";
         constexpr const char* PANEL_LOCALS = "locals";
+        constexpr const char* PANEL_WATCH = "watch";
         constexpr const char* PANEL_REGISTERS = "registers";
         constexpr const char* PANEL_SYMBOLS = "symbols";
         constexpr const char* PANEL_DISASSEMBLY = "disassembly";
         constexpr const char* PANEL_CONSOLE = "console";
         constexpr const char* PANEL_PROFILER = "profiler";
-        constexpr const char* PANEL_TIMELINE = "timeline";
         constexpr const char* PANEL_MACROS = "macros";
 
         constexpr const char* LOAD_TARGET_POPUP = "load target";
@@ -236,6 +236,19 @@ namespace Hsdbg
             return std::ranges::any_of(node.children, [&](const SourceNode& child)
             {
                 return source_node_matches(child, filter);
+            });
+        }
+
+        // whether the file lives anywhere under this node, so a folder can tell if
+        // it is on the path to the open source and should reveal itself
+        auto node_contains(const SourceNode& node, const std::filesystem::path& target) -> bool
+        {
+            if (!node.path.empty())
+                return node.path == target;
+
+            return std::ranges::any_of(node.children, [&](const SourceNode& child)
+            {
+                return node_contains(child, target);
             });
         }
 
@@ -512,6 +525,11 @@ namespace Hsdbg
         m_scroll_to_program_counter = true;
         m_scroll_to_symbol = true;
 
+        follow_selected_frame(debugger);
+    }
+
+    auto Ui::follow_selected_frame(Debugger& debugger) -> void
+    {
         const std::span<const StackFrame> stack = debugger.call_stack();
 
         // the innermost frames are often runtime internals with no source, and
@@ -628,32 +646,57 @@ namespace Hsdbg
             m_focus_macros = true;
         }
 
+        // right-clicking a name in the source adds it to the watch list
+        if (std::optional<std::string> request = m_source_view.take_watch_request())
+            add_watch(debugger, std::move(*request));
+
+        // let the profiling views appear on their own the moment work starts:
+        // the profiler (which now holds the flame chart, timings and graphs) when
+        // something is being sampled, traced or instrumented. the latch means it
+        // only springs up on the rising edge, so closing it makes it stay closed
+        const bool profiling_active = debugger.sampling_enabled() ||
+                                      debugger.instrumentation_active() ||
+                                      !debugger.traces().empty();
+
+        if (profiling_active && !m_profiler_revealed)
+            m_visible.profiler = true;
+        m_profiler_revealed = profiling_active;
+
         draw_breakpoints_panel(debugger);
         draw_call_stack_panel(debugger);
         draw_source_tree_panel(debugger);
         draw_threads_panel(debugger);
         draw_locals_panel(debugger);
+        draw_watch_panel(debugger);
         draw_registers_panel(debugger);
         draw_symbols_panel(debugger);
         draw_disassembly_panel(debugger);
         draw_console_panel(debugger);
         draw_profiler_panel(debugger);
-        draw_timeline_panel(debugger);
         draw_macros_panel(debugger);
 
         if (m_visible.demo)
             ImGui::ShowDemoWindow(&m_visible.demo);
 
         draw_preferences_window();
+        draw_command_palette(debugger);
 
         // a window claims its tab when it is first submitted, so this can only be
-        // asked for once every panel in the node exists
+        // asked for once every panel in the node exists. within each tabbed node
+        // the later focus wins, so raise the tab we want in front last; the very
+        // last call also lands the keyboard focus, which belongs on the source
         if (m_select_default_tabs)
         {
-            ImGui::SetWindowFocus(PANEL_LOCALS);
-            ImGui::SetWindowFocus(PANEL_BREAKPOINTS);
-            ImGui::SetWindowFocus(PANEL_SOURCE);
+            ImGui::SetWindowFocus(PANEL_SYMBOLS);
             ImGui::SetWindowFocus(PANEL_SOURCE_TREE);
+            ImGui::SetWindowFocus(PANEL_THREADS);
+            ImGui::SetWindowFocus(PANEL_CALL_STACK);
+            ImGui::SetWindowFocus(PANEL_WATCH);
+            ImGui::SetWindowFocus(PANEL_LOCALS);
+            ImGui::SetWindowFocus(PANEL_DISASSEMBLY);
+            ImGui::SetWindowFocus(PANEL_BREAKPOINTS);
+            ImGui::SetWindowFocus(PANEL_CONSOLE);
+            ImGui::SetWindowFocus(PANEL_SOURCE);
             m_select_default_tabs = false;
         }
 
@@ -679,6 +722,12 @@ namespace Hsdbg
             ImGui::SetWindowFocus(PANEL_MACROS);
             m_focus_macros = false;
         }
+
+        if (m_focus_profiler)
+        {
+            ImGui::SetWindowFocus(PANEL_PROFILER);
+            m_focus_profiler = false;
+        }
     }
 
     auto Ui::build_default_layout(uint32_t dockspace_id) -> void
@@ -687,28 +736,43 @@ namespace Hsdbg
         ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
         ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->WorkSize);
 
+        // four regions frame a central code view, each holding one stage of the
+        // debugging loop so related panels sit together instead of scattered:
+        //   left   navigator - where to go (files, symbols) over where execution
+        //                      currently is (call stack, threads)
+        //   center code      - source and disassembly, both tracking the pc
+        //   right  inspector - the selected frame's state: locals over registers
+        //   bottom output    - the console and the auxiliary read-outs
         ImGuiID center_id = dockspace_id;
         const ImGuiID left_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Left, 0.20f, nullptr, &center_id);
-        const ImGuiID right_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Right, 0.22f, nullptr, &center_id);
-        const ImGuiID bottom_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Down, 0.24f, nullptr, &center_id);
+        const ImGuiID right_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Right, 0.24f, nullptr, &center_id);
+        const ImGuiID bottom_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Down, 0.26f, nullptr, &center_id);
 
         ImGuiID left_top_id = left_id;
         const ImGuiID left_bottom_id = ImGui::DockBuilderSplitNode(left_top_id, ImGuiDir_Down, 0.5f, nullptr, &left_top_id);
 
         ImGuiID right_top_id = right_id;
-        const ImGuiID right_bottom_id = ImGui::DockBuilderSplitNode(right_top_id, ImGuiDir_Down, 0.5f, nullptr, &right_top_id);
+        const ImGuiID right_bottom_id = ImGui::DockBuilderSplitNode(right_top_id, ImGuiDir_Down, 0.45f, nullptr, &right_top_id);
 
+        // navigator: where to go, then where execution is
+        ImGui::DockBuilderDockWindow(PANEL_SOURCE_TREE, left_top_id);
+        ImGui::DockBuilderDockWindow(PANEL_SYMBOLS, left_top_id);
+        ImGui::DockBuilderDockWindow(PANEL_CALL_STACK, left_bottom_id);
+        ImGui::DockBuilderDockWindow(PANEL_THREADS, left_bottom_id);
+
+        // code
         ImGui::DockBuilderDockWindow(PANEL_SOURCE, center_id);
         ImGui::DockBuilderDockWindow(PANEL_DISASSEMBLY, center_id);
-        ImGui::DockBuilderDockWindow(PANEL_TIMELINE, center_id);
-        ImGui::DockBuilderDockWindow(PANEL_SOURCE_TREE, left_top_id);
-        ImGui::DockBuilderDockWindow(PANEL_THREADS, left_top_id);
-        ImGui::DockBuilderDockWindow(PANEL_SYMBOLS, left_bottom_id);
+
+        // inspector: locals and the watch list share the top, the frame's state
+        // over the frame's registers
         ImGui::DockBuilderDockWindow(PANEL_LOCALS, right_top_id);
-        ImGui::DockBuilderDockWindow(PANEL_CALL_STACK, right_top_id);
+        ImGui::DockBuilderDockWindow(PANEL_WATCH, right_top_id);
         ImGui::DockBuilderDockWindow(PANEL_REGISTERS, right_bottom_id);
-        ImGui::DockBuilderDockWindow(PANEL_BREAKPOINTS, bottom_id);
+
+        // output drawer
         ImGui::DockBuilderDockWindow(PANEL_CONSOLE, bottom_id);
+        ImGui::DockBuilderDockWindow(PANEL_BREAKPOINTS, bottom_id);
         ImGui::DockBuilderDockWindow(PANEL_PROFILER, bottom_id);
         ImGui::DockBuilderDockWindow(PANEL_MACROS, bottom_id);
 
@@ -734,6 +798,9 @@ namespace Hsdbg
                 debugger.unload_target();
 
             ImGui::Separator();
+
+            if (ImGui::MenuItem("command palette...", "cmd+k"))
+                m_palette_request = true;
 
             ImGui::MenuItem("preferences...", nullptr, &m_show_preferences);
 
@@ -788,12 +855,12 @@ namespace Hsdbg
             ImGui::MenuItem(PANEL_CALL_STACK, nullptr, &m_visible.call_stack);
             ImGui::MenuItem(PANEL_THREADS, nullptr, &m_visible.threads);
             ImGui::MenuItem(PANEL_LOCALS, nullptr, &m_visible.locals);
+            ImGui::MenuItem(PANEL_WATCH, nullptr, &m_visible.watch);
             ImGui::MenuItem(PANEL_REGISTERS, nullptr, &m_visible.registers);
             ImGui::MenuItem(PANEL_SYMBOLS, nullptr, &m_visible.symbols);
             ImGui::MenuItem(PANEL_DISASSEMBLY, nullptr, &m_visible.disassembly);
             ImGui::MenuItem(PANEL_CONSOLE, nullptr, &m_visible.console);
             ImGui::MenuItem(PANEL_PROFILER, nullptr, &m_visible.profiler);
-            ImGui::MenuItem(PANEL_TIMELINE, nullptr, &m_visible.timeline);
             ImGui::MenuItem(PANEL_MACROS, nullptr, &m_visible.macros);
 
             ImGui::Separator();
@@ -877,6 +944,30 @@ namespace Hsdbg
         if (ImGui::Button("step out"))
             report(debugger.step_out(), "step out");
         ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+
+        // the way in to profiling, and the way back out: the panel only exists
+        // while this is on, and lights up to show that it is. the button toggles
+        // that state, so the tint is keyed off a copy taken before the click or
+        // the push and pop would not balance
+        const bool profiler_open = m_visible.profiler;
+
+        if (profiler_open)
+            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+
+        if (ImGui::Button("profiler"))
+        {
+            m_visible.profiler = !m_visible.profiler;
+
+            if (m_visible.profiler)
+                m_focus_profiler = true;
+        }
+
+        if (profiler_open)
+            ImGui::PopStyleColor();
 
         ImGui::SameLine();
         ImGui::TextDisabled("|");
@@ -1193,8 +1284,7 @@ namespace Hsdbg
             else
             {
                 constexpr ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
-                                                  ImGuiTableFlags_SizingStretchProp |
-                                                  ImGuiTableFlags_ScrollY;
+                                                  ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY;
 
                 if (ImGui::BeginTable("##breakpoints", 8, flags))
                 {
@@ -1232,9 +1322,25 @@ namespace Hsdbg
                         }
                         else if (breakpoint.line != 0)
                         {
-                            ImGui::Text("%s:%u",
-                                        breakpoint.file.filename().string().c_str(),
-                                        breakpoint.line);
+                            // clicking the location takes the source view there, so
+                            // the breakpoints list doubles as a jump list. plain
+                            // text with a click test, not a Selectable: a full-width
+                            // Selectable in this stretch-sized column feeds its own
+                            // width back into the column solver and lands on NaN
+                            const std::string location = std::format(
+                                "{}:{}", breakpoint.file.filename().string(), breakpoint.line);
+
+                            ImGui::TextUnformatted(location.c_str());
+
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+                            if (ImGui::IsItemClicked() && !breakpoint.file.empty())
+                            {
+                                open_source(breakpoint.file);
+                                m_source_view.set_highlighted_line(breakpoint.line);
+                                ImGui::SetWindowFocus(PANEL_SOURCE);
+                            }
                         }
                         else
                         {
@@ -1364,7 +1470,11 @@ namespace Hsdbg
                     {
                         debugger.select_thread(thread.id);
 
+                        // land the source, disassembly and inspector on this
+                        // thread's own frame instead of leaving them on the last
                         m_scroll_to_program_counter = true;
+                        m_scroll_to_symbol = true;
+                        follow_selected_frame(debugger);
                     }
 
                     ImGui::SameLine();
@@ -1397,6 +1507,11 @@ namespace Hsdbg
                 const SourceNode tree = build_source_tree(files);
                 const std::filesystem::path& open = m_source_view.path();
 
+                // folders stay collapsed until they are needed. when the open file
+                // changes, the one frame where it differs from what we last showed
+                // expands the chain down to it; after that the user is in control
+                const bool reveal = open != m_revealed_source;
+
                 ImDrawList* const draw_list = ImGui::GetWindowDrawList();
 
                 const auto draw_node = [&](this const auto& self, const SourceNode& node) -> void
@@ -1428,12 +1543,17 @@ namespace Hsdbg
                         return;
                     }
 
-                    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth |
-                                               ImGuiTreeNodeFlags_OpenOnArrow |
-                                               ImGuiTreeNodeFlags_OpenOnDoubleClick;
+                    constexpr ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth |
+                                                         ImGuiTreeNodeFlags_OpenOnArrow |
+                                                         ImGuiTreeNodeFlags_OpenOnDoubleClick;
 
-                    if (m_source_filter.empty())
-                        flags |= ImGuiTreeNodeFlags_DefaultOpen;
+                    // a filter opens every folder so its matches are visible; with
+                    // no filter, only the chain down to the open file unfurls, and
+                    // only on the frame it changed so manual collapses survive
+                    if (!m_source_filter.empty())
+                        ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+                    else if (reveal && node_contains(node, open))
+                        ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 
                     ImGui::PushStyleColor(ImGuiCol_Text, SOURCE_FOLDER_COLOR);
                     const bool open_node = ImGui::TreeNodeEx(node.name.c_str(), flags);
@@ -1479,6 +1599,8 @@ namespace Hsdbg
                     ImGui::TextDisabled("no source files");
                 else
                     draw_node(tree);
+
+                m_revealed_source = open;
             }
         }
 
@@ -1513,6 +1635,148 @@ namespace Hsdbg
                         draw_variable(variable);
 
                     ImGui::EndTable();
+                }
+            }
+        }
+
+        ImGui::End();
+    }
+
+    auto Ui::add_watch(Debugger& debugger, std::string expression) -> void
+    {
+        if (expression.empty())
+            return;
+
+        if (std::ranges::any_of(m_watches, [&](const Watch& watch)
+                                { return watch.expression == expression; }))
+        {
+            m_visible.watch = true;
+            return;
+        }
+
+        Watch watch;
+        watch.expression = std::move(expression);
+
+        if (debugger.is_stopped())
+        {
+            if (const auto result = debugger.evaluate(watch.expression))
+            {
+                watch.value = *result;
+                watch.ok = true;
+            }
+            else
+            {
+                watch.value = result.error();
+            }
+        }
+
+        m_watches.push_back(std::move(watch));
+        m_visible.watch = true;
+    }
+
+    auto Ui::draw_watch_panel(Debugger& debugger) -> void
+    {
+        if (!m_visible.watch)
+            return;
+
+        if (ImGui::Begin(PANEL_WATCH, &m_visible.watch))
+        {
+            // re-run the expressions whenever the target stops again or the frame
+            // the ui is looking at moves, but never every frame: each call jits and
+            // runs code in the target
+            const bool stopped = debugger.is_stopped();
+            const bool moved = debugger.stop_count() != m_watch_stop ||
+                               debugger.selected_thread() != m_watch_thread ||
+                               debugger.selected_frame() != m_watch_frame;
+
+            if (stopped && (moved || !m_watch_evaluated))
+            {
+                m_watch_stop = debugger.stop_count();
+                m_watch_thread = debugger.selected_thread();
+                m_watch_frame = debugger.selected_frame();
+                m_watch_evaluated = true;
+
+                for (Watch& watch : m_watches)
+                {
+                    if (const auto result = debugger.evaluate(watch.expression))
+                    {
+                        watch.value = *result;
+                        watch.ok = true;
+                    }
+                    else
+                    {
+                        watch.value = result.error();
+                        watch.ok = false;
+                    }
+                }
+            }
+
+            if (!stopped)
+                m_watch_evaluated = false;
+
+            ImGui::SetNextItemWidth(-60.0f);
+            const bool submitted = ImGui::InputTextWithHint("##watch_input", "expression to watch",
+                                                            &m_watch_input,
+                                                            ImGuiInputTextFlags_EnterReturnsTrue);
+
+            ImGui::SameLine();
+            const bool add_clicked = ImGui::Button("watch", ImVec2(-1.0f, 0.0f));
+
+            if ((submitted || add_clicked) && !m_watch_input.empty())
+            {
+                add_watch(debugger, m_watch_input);
+                m_watch_input.clear();
+            }
+
+            if (m_watches.empty())
+            {
+                ImGui::TextDisabled("watch an expression; it re-evaluates on every stop");
+            }
+            else
+            {
+                constexpr ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                                  ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY;
+
+                if (ImGui::BeginTable("##watches", 3, flags))
+                {
+                    ImGui::TableSetupColumn("expression", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+                    ImGui::TableSetupColumn("value");
+                    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+                    ImGui::TableSetupScrollFreeze(0, 1);
+                    ImGui::TableHeadersRow();
+
+                    size_t remove_index = m_watches.size();
+
+                    for (size_t index = 0; index < m_watches.size(); ++index)
+                    {
+                        const Watch& watch = m_watches[index];
+
+                        ImGui::TableNextRow();
+                        ImGui::PushID(static_cast<int>(index));
+
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(watch.expression.c_str());
+
+                        ImGui::TableNextColumn();
+                        if (!m_watch_evaluated && !stopped)
+                            ImGui::TextDisabled("-");
+                        else if (watch.ok)
+                            ImGui::TextUnformatted(watch.value.c_str());
+                        else
+                            ImGui::TextColored(ImVec4(0.85f, 0.45f, 0.45f, 1.0f), "%s",
+                                               watch.value.c_str());
+
+                        ImGui::TableNextColumn();
+                        if (ImGui::SmallButton("x"))
+                            remove_index = index;
+
+                        ImGui::PopID();
+                    }
+
+                    ImGui::EndTable();
+
+                    if (remove_index < m_watches.size())
+                        m_watches.erase(m_watches.begin() + static_cast<std::ptrdiff_t>(remove_index));
                 }
             }
         }
@@ -1742,61 +2006,59 @@ namespace Hsdbg
 
         if (ImGui::Begin(PANEL_PROFILER, &m_visible.profiler))
         {
-            bool paused = m_profiler.paused();
-            if (ImGui::Checkbox("pause", &paused))
-                m_profiler.set_paused(paused);
-
-            ImGui::SameLine();
-            if (ImGui::Button("reset"))
-                m_profiler.reset();
-
-            ImGui::Separator();
-
-            if (!debugger.has_target())
-            {
-                ImGui::TextDisabled("no target: load and run a process to profile it");
-            }
-            else
-            {
-                const TimeSeries& memory = m_profiler.target_memory_mb();
-
-                const std::string memory_overlay =
-                    std::format("{:.1f} MB  (peak {:.1f})", memory.latest(), memory.maximum());
-
-                ImGui::TextUnformatted("resident memory");
-                ImGui::PlotLines("##target_memory", memory.values(), memory.count(), memory.offset(),
-                                 memory_overlay.c_str(), 0.0f, FLT_MAX, ImVec2(-1.0f, 90.0f));
-            }
-
-            ImGui::Separator();
-            ImGui::TextUnformatted("function tracing");
-
-            ImGui::SetNextItemWidth(-70.0f);
-            const bool submitted = ImGui::InputTextWithHint("##trace_input", "function to time",
-                                                            &m_trace_input,
-                                                            ImGuiInputTextFlags_EnterReturnsTrue);
-
-            ImGui::SameLine();
-            const bool add_clicked = ImGui::Button("trace", ImVec2(-1.0f, 0.0f));
-
-            if ((submitted || add_clicked) && !m_trace_input.empty())
-            {
-                debugger.add_trace(m_trace_input);
-                m_trace_input.clear();
-            }
-
+            const bool instrumented = debugger.instrumentation_active();
             const std::span<const FunctionTrace> traces = debugger.traces();
 
-            if (traces.empty())
+            // compact header: how calls are being gathered. instrumentation, when
+            // the target carries it, is exact and needs nothing; otherwise sampling
+            // approximates on any binary. either way calls flow into the flame chart
+            if (instrumented)
             {
-                ImGui::TextDisabled("no traced functions yet");
+                ImGui::TextDisabled("instrumented target — every function timed automatically");
             }
             else
             {
-                constexpr ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
-                                                  ImGuiTableFlags_SizingStretchProp;
+                bool sampling = debugger.sampling_enabled();
+                if (ImGui::Checkbox("sample while running", &sampling))
+                    debugger.set_sampling_enabled(sampling);
 
-                if (ImGui::BeginTable("##traces", 6, flags))
+                ImGui::SameLine();
+                ImGui::TextDisabled("(any binary, approximate)");
+            }
+
+            // the hero view: the call flame chart, given the lion's share of the
+            // panel, with the detail sections collapsed beneath it
+            const float flame_height = std::max(ImGui::GetContentRegionAvail().y * 0.6f, 150.0f);
+
+            if (ImGui::BeginChild("##flamegraph", ImVec2(0.0f, flame_height), ImGuiChildFlags_Borders))
+                draw_flamegraph(debugger);
+
+            ImGui::EndChild();
+
+            // exact per-function timings, and the box to add another
+            if (ImGui::CollapsingHeader("function timings", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                ImGui::SetNextItemWidth(-70.0f);
+                const bool submitted = ImGui::InputTextWithHint("##trace_input", "function to time",
+                                                                &m_trace_input,
+                                                                ImGuiInputTextFlags_EnterReturnsTrue);
+
+                ImGui::SameLine();
+                const bool add_clicked = ImGui::Button("trace", ImVec2(-1.0f, 0.0f));
+
+                if ((submitted || add_clicked) && !m_trace_input.empty())
+                {
+                    debugger.add_trace(m_trace_input);
+                    m_trace_input.clear();
+                }
+
+                if (traces.empty())
+                {
+                    ImGui::TextDisabled("name a function above to count and time its calls");
+                }
+                else if (ImGui::BeginTable("##traces", 6,
+                                           ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                           ImGuiTableFlags_Resizable))
                 {
                     ImGui::TableSetupColumn("function");
                     ImGui::TableSetupColumn("calls", ImGuiTableColumnFlags_WidthFixed, 52.0f);
@@ -1855,8 +2117,32 @@ namespace Hsdbg
                 }
             }
 
-            if (ImGui::CollapsingHeader("debugger self-timing"))
+            // the live footprint of the process under debug
+            if (debugger.has_target() &&
+                ImGui::CollapsingHeader("resident memory", ImGuiTreeNodeFlags_DefaultOpen))
             {
+                const TimeSeries& memory = m_profiler.target_memory_mb();
+
+                ImGui::Text("%.1f MB", memory.latest());
+                ImGui::SameLine();
+                ImGui::TextDisabled("peak %.1f MB", memory.maximum());
+
+                ImGui::PlotLines("##target_memory", memory.values(), memory.count(), memory.offset(),
+                                 nullptr, 0.0f, FLT_MAX, ImVec2(-1.0f, 60.0f));
+            }
+
+            // hsdbg's own frame cost, tucked away: useful when the ui itself feels
+            // slow, not part of profiling the target
+            if (ImGui::CollapsingHeader("hsdbg self-timing"))
+            {
+                bool paused = m_profiler.paused();
+                if (ImGui::Checkbox("pause graphs", &paused))
+                    m_profiler.set_paused(paused);
+
+                ImGui::SameLine();
+                if (ImGui::SmallButton("reset"))
+                    m_profiler.reset();
+
                 const TimeSeries& frame_ms = m_profiler.frame_times();
                 const TimeSeries& fps = m_profiler.frame_rates();
 
@@ -1880,119 +2166,102 @@ namespace Hsdbg
         ImGui::End();
     }
 
-    auto Ui::draw_timeline_panel(Debugger& debugger) -> void
+    auto Ui::draw_flamegraph(const Debugger& debugger) -> void
     {
-        if (!m_visible.timeline)
-            return;
+        const std::span<const TimelineSpan> spans = debugger.timeline();
 
-        if (ImGui::Begin(PANEL_TIMELINE, &m_visible.timeline))
+        if (spans.empty())
         {
-            const std::span<const TimelineSpan> spans = debugger.timeline();
-
             if (debugger.instrumentation_active())
-            {
-                ImGui::TextDisabled("instrumented: every function traced automatically");
-            }
+                ImGui::TextDisabled("instrumented target — run it to lay out its calls here");
+            else if (debugger.sampling_enabled())
+                ImGui::TextDisabled("sampling — run the target and the calls will appear here");
             else
+                ImGui::TextDisabled("turn on sampling, or trace a function below, then run");
+
+            return;
+        }
+
+        // resolve a trace id to its function name for labels and tooltips
+        const auto name_of = [&](uint32_t trace_id) -> const char*
+        {
+            return debugger.span_label(trace_id);
+        };
+
+        // the time range to fit and how tall the call stack gets
+        double t_min = spans.front().start;
+        double t_max = t_min;
+        uint32_t max_depth = 0;
+
+        for (const TimelineSpan& span : spans)
+        {
+            t_min = std::min(t_min, span.start);
+            t_max = std::max(t_max, span.start + span.duration);
+            max_depth = std::max(max_depth, span.depth);
+        }
+
+        const double range = std::max(t_max - t_min, 1.0e-6);
+
+        ImGui::Text("%.3f ms total   %zu calls", range * 1000.0, spans.size());
+
+        constexpr float row_height = 20.0f;
+        const float rows = static_cast<float>(max_depth + 1);
+
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+
+        const float canvas_w = std::max(avail.x, 1.0f);
+        const float canvas_h = std::max(avail.y, rows * row_height + 4.0f);
+
+        // claim the region so hovering resolves against it
+        ImGui::InvisibleButton("##flame_canvas", ImVec2(canvas_w, canvas_h));
+        const bool canvas_hovered = ImGui::IsItemHovered();
+
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        draw_list->PushClipRect(origin, ImVec2(origin.x + canvas_w, origin.y + canvas_h), true);
+
+        const float scale = canvas_w / static_cast<float>(range); // pixels per second
+        const float baseline = origin.y + canvas_h;               // row 0 rests on the bottom
+
+        const ImVec2 mouse = ImGui::GetMousePos();
+
+        for (const TimelineSpan& span : spans)
+        {
+            const float x0 = origin.x + static_cast<float>((span.start - t_min) * scale);
+            const float width = std::max(1.0f, static_cast<float>(span.duration * scale));
+            const float y1 = baseline - static_cast<float>(span.depth) * row_height;
+            const float y0 = y1 - (row_height - 2.0f);
+
+            const ImU32 fill = ImColor::HSV(span.trace_id * 0.13f, 0.55f, 0.78f);
+
+            draw_list->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + width, y1), fill, 2.0f);
+            draw_list->AddRect(ImVec2(x0, y0), ImVec2(x0 + width, y1), IM_COL32(0, 0, 0, 90), 2.0f);
+
+            if (width > 24.0f)
             {
-                bool sampling = debugger.sampling_enabled();
-                if (ImGui::Checkbox("sample while running", &sampling))
-                    debugger.set_sampling_enabled(sampling);
-
-                ImGui::SameLine();
-                ImGui::TextDisabled("(any binary, approximate)");
-            }
-
-            if (spans.empty())
-            {
-                ImGui::TextDisabled("run an instrumented target, or trace functions, then stop to see calls");
-            }
-            else
-            {
-                // resolve a trace id to its function name for labels and tooltips
-                const auto name_of = [&](uint32_t trace_id) -> const char*
-                {
-                    return debugger.span_label(trace_id);
-                };
-
-                // the time range to fit and how tall the call stack gets
-                double t_min = spans.front().start;
-                double t_max = t_min;
-                uint32_t max_depth = 0;
-
-                for (const TimelineSpan& span : spans)
-                {
-                    t_min = std::min(t_min, span.start);
-                    t_max = std::max(t_max, span.start + span.duration);
-                    max_depth = std::max(max_depth, span.depth);
-                }
-
-                const double range = std::max(t_max - t_min, 1.0e-6);
-
-                ImGui::Text("%.3f ms total   %zu calls", range * 1000.0, spans.size());
-
-                constexpr float row_height = 20.0f;
-                const float rows = static_cast<float>(max_depth + 1);
-
-                const ImVec2 origin = ImGui::GetCursorScreenPos();
-                const ImVec2 avail = ImGui::GetContentRegionAvail();
-
-                const float canvas_w = std::max(avail.x, 1.0f);
-                const float canvas_h = std::max(avail.y, rows * row_height + 4.0f);
-
-                // claim the region so hovering resolves against it
-                ImGui::InvisibleButton("##timeline_canvas", ImVec2(canvas_w, canvas_h));
-                const bool canvas_hovered = ImGui::IsItemHovered();
-
-                ImDrawList* draw_list = ImGui::GetWindowDrawList();
-                draw_list->PushClipRect(origin, ImVec2(origin.x + canvas_w, origin.y + canvas_h), true);
-
-                const float scale = canvas_w / static_cast<float>(range); // pixels per second
-                const float baseline = origin.y + canvas_h;               // row 0 rests on the bottom
-
-                const ImVec2 mouse = ImGui::GetMousePos();
-
-                for (const TimelineSpan& span : spans)
-                {
-                    const float x0 = origin.x + static_cast<float>((span.start - t_min) * scale);
-                    const float width = std::max(1.0f, static_cast<float>(span.duration * scale));
-                    const float y1 = baseline - static_cast<float>(span.depth) * row_height;
-                    const float y0 = y1 - (row_height - 2.0f);
-
-                    const ImU32 fill = ImColor::HSV(span.trace_id * 0.13f, 0.55f, 0.78f);
-
-                    draw_list->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + width, y1), fill, 2.0f);
-                    draw_list->AddRect(ImVec2(x0, y0), ImVec2(x0 + width, y1), IM_COL32(0, 0, 0, 90), 2.0f);
-
-                    if (width > 24.0f)
-                    {
-                        draw_list->PushClipRect(ImVec2(x0 + 2.0f, y0), ImVec2(x0 + width - 2.0f, y1), true);
-                        draw_list->AddText(ImVec2(x0 + 4.0f, y0 + 2.0f), IM_COL32(20, 20, 20, 255),
-                                      name_of(span.trace_id));
-                        draw_list->PopClipRect();
-                    }
-
-                    const bool over = canvas_hovered && mouse.x >= x0 && mouse.x <= x0 + width &&
-                                      mouse.y >= y0 && mouse.y <= y1;
-
-                    if (over)
-                    {
-                        ImGui::BeginTooltip();
-                        ImGui::TextUnformatted(name_of(span.trace_id));
-                        ImGui::Text("start %.3f ms", (span.start - t_min) * 1000.0);
-                        if (span.duration > 0.0)
-                            ImGui::Text("duration %.3f ms", span.duration * 1000.0);
-                        else
-                            ImGui::TextDisabled("running...");
-                        ImGui::EndTooltip();
-                    }
-                }
-
+                draw_list->PushClipRect(ImVec2(x0 + 2.0f, y0), ImVec2(x0 + width - 2.0f, y1), true);
+                draw_list->AddText(ImVec2(x0 + 4.0f, y0 + 2.0f), IM_COL32(20, 20, 20, 255),
+                              name_of(span.trace_id));
                 draw_list->PopClipRect();
+            }
+
+            const bool over = canvas_hovered && mouse.x >= x0 && mouse.x <= x0 + width &&
+                              mouse.y >= y0 && mouse.y <= y1;
+
+            if (over)
+            {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(name_of(span.trace_id));
+                ImGui::Text("start %.3f ms", (span.start - t_min) * 1000.0);
+                if (span.duration > 0.0)
+                    ImGui::Text("duration %.3f ms", span.duration * 1000.0);
+                else
+                    ImGui::TextDisabled("running...");
+                ImGui::EndTooltip();
             }
         }
 
-        ImGui::End();
+        draw_list->PopClipRect();
     }
 
     auto Ui::draw_macros_panel(Debugger& /*debugger*/) -> void
@@ -2108,6 +2377,231 @@ namespace Hsdbg
         }
 
         ImGui::End();
+    }
+
+    auto Ui::draw_command_palette(Debugger& debugger) -> void
+    {
+        // cmd/ctrl+k anywhere, or the menu item, opens it; opening resets the query
+        // so it always starts clean and asks for the text field's focus next frame
+        const bool open_requested =
+            ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_K) || m_palette_request;
+
+        m_palette_request = false;
+
+        if (open_requested)
+        {
+            m_palette_open = true;
+            m_palette_focus = true;
+            m_palette_selection = 0;
+            m_palette_query.clear();
+            ImGui::OpenPopup("##command_palette");
+        }
+
+        if (!m_palette_open)
+            return;
+
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        const ImVec2 size(std::min(viewport->WorkSize.x - 80.0f, 640.0f), 0.0f);
+
+        ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                       viewport->WorkPos.y + 90.0f),
+                                ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+        ImGui::SetNextWindowSize(size);
+
+        constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
+                                           ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings;
+
+        if (!ImGui::BeginPopup("##command_palette", flags))
+        {
+            // esc or a click outside closed it
+            m_palette_open = false;
+            return;
+        }
+
+        // every command the palette can run; only the ones that make sense for the
+        // current state are offered, so the list never dangles a dead action
+        enum class Kind : uint8_t { Command, File, Symbol };
+        enum Command : uint8_t
+        {
+            Run, Continue, Pause, Stop, StepOver, StepInto, StepOut, ToggleProfiler
+        };
+
+        struct Entry
+        {
+            std::string label;
+            const char* hint = "";
+            Kind kind = Kind::Command;
+            Command command = Run;
+            std::filesystem::path file;
+            uint64_t symbol = 0;
+        };
+
+        const bool has_target = debugger.has_target();
+        const bool running = debugger.is_running();
+        const bool stopped = debugger.is_stopped();
+
+        std::vector<Entry> entries;
+
+        const auto add_command = [&](bool enabled, Command command, const char* label)
+        {
+            if (enabled && matches_filter(label, m_palette_query))
+                entries.push_back({ label, "command", Kind::Command, command, {}, 0 });
+        };
+
+        add_command(has_target && !running, Run, "run");
+        add_command(stopped, Continue, "continue");
+        add_command(running, Pause, "pause");
+        add_command(has_target, Stop, "stop");
+        add_command(stopped, StepOver, "step over");
+        add_command(stopped, StepInto, "step into");
+        add_command(stopped, StepOut, "step out");
+        add_command(true, ToggleProfiler, m_visible.profiler ? "hide profiler" : "show profiler");
+
+        // files and symbols only clutter the list once there is a query to match
+        if (!m_palette_query.empty())
+        {
+            for (const std::filesystem::path& file : debugger.source_files())
+            {
+                if (entries.size() >= 60)
+                    break;
+
+                if (matches_filter(file.filename().string(), m_palette_query))
+                    entries.push_back({ file.filename().string(), "file", Kind::File, Run, file, 0 });
+            }
+
+            for (const Symbol& symbol : debugger.symbols())
+            {
+                if (entries.size() >= 120)
+                    break;
+
+                if (matches_filter(symbol.name, m_palette_query))
+                    entries.push_back({ symbol.name, "symbol", Kind::Symbol, Run, {}, symbol.file_address });
+            }
+        }
+
+        if (entries.empty())
+            m_palette_selection = 0;
+        else
+            m_palette_selection = std::clamp(m_palette_selection, 0, static_cast<int>(entries.size()) - 1);
+
+        // arrow keys walk the results; the input field ignores up/down itself, so
+        // reading them here does not fight the cursor
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) && !entries.empty())
+            m_palette_selection = (m_palette_selection + 1) % static_cast<int>(entries.size());
+
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) && !entries.empty())
+        {
+            m_palette_selection = (m_palette_selection - 1 + static_cast<int>(entries.size())) %
+                                  static_cast<int>(entries.size());
+        }
+
+        const auto activate = [&](const Entry& entry)
+        {
+            switch (entry.kind)
+            {
+                case Kind::File:
+                    open_source(entry.file);
+                    ImGui::SetWindowFocus(PANEL_SOURCE);
+                    break;
+
+                case Kind::Symbol:
+                    if (debugger.select_symbol(entry.symbol))
+                    {
+                        m_focus_disassembly = true;
+                        m_scroll_to_program_counter = true;
+                    }
+                    break;
+
+                case Kind::Command:
+                    switch (entry.command)
+                    {
+                        case Run:
+                        {
+                            LaunchSpec spec;
+                            spec.executable = debugger.target_path();
+                            spec.stop_at_entry = m_preferences.stop_at_entry;
+                            report(debugger.launch(spec), "run");
+                            break;
+                        }
+                        case Continue:  report(debugger.resume(), "continue");   break;
+                        case Pause:     report(debugger.pause(), "pause");       break;
+                        case Stop:      report(debugger.terminate(), "stop");    break;
+                        case StepOver:  report(debugger.step_over(), "step over"); break;
+                        case StepInto:  report(debugger.step_into(), "step into"); break;
+                        case StepOut:   report(debugger.step_out(), "step out");  break;
+                        case ToggleProfiler:
+                            m_visible.profiler = !m_visible.profiler;
+                            if (m_visible.profiler)
+                                m_focus_profiler = true;
+                            break;
+                    }
+                    break;
+            }
+
+            m_palette_open = false;
+            ImGui::CloseCurrentPopup();
+        };
+
+        if (m_palette_focus)
+        {
+            ImGui::SetKeyboardFocusHere();
+            m_palette_focus = false;
+        }
+
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        const bool submitted = ImGui::InputTextWithHint("##palette_query",
+                                                        "jump to a file or symbol, or run a command",
+                                                        &m_palette_query,
+                                                        ImGuiInputTextFlags_EnterReturnsTrue);
+
+        if (submitted && !entries.empty())
+        {
+            activate(entries[static_cast<size_t>(m_palette_selection)]);
+            ImGui::EndPopup();
+            return;
+        }
+
+        ImGui::Separator();
+
+        if (entries.empty())
+        {
+            ImGui::TextDisabled("no matches");
+        }
+        else
+        {
+            const float row = ImGui::GetTextLineHeightWithSpacing();
+            ImGui::BeginChild("##palette_results", ImVec2(0.0f, std::min(row * 10.0f + 4.0f,
+                                                                         row * static_cast<float>(entries.size()) + 4.0f)));
+
+            for (int index = 0; index < static_cast<int>(entries.size()); ++index)
+            {
+                const Entry& entry = entries[static_cast<size_t>(index)];
+                const bool selected = index == m_palette_selection;
+
+                ImGui::PushID(index);
+
+                if (ImGui::Selectable("##row", selected, ImGuiSelectableFlags_SpanAllColumns))
+                    activate(entry);
+
+                // keep the keyboard-picked row in view as it moves
+                if (selected && (ImGui::IsKeyPressed(ImGuiKey_UpArrow) ||
+                                 ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsWindowAppearing()))
+                    ImGui::SetScrollHereY(0.5f);
+
+                ImGui::SameLine(0.0f, 0.0f);
+                ImGui::TextUnformatted(entry.label.c_str());
+
+                const float hint_width = ImGui::CalcTextSize(entry.hint).x;
+                ImGui::SameLine(ImGui::GetContentRegionAvail().x - hint_width);
+                ImGui::TextDisabled("%s", entry.hint);
+
+                ImGui::PopID();
+            }
+
+            ImGui::EndChild();
+        }
+
+        ImGui::EndPopup();
     }
 
     auto Ui::push_console(std::string line) -> void
