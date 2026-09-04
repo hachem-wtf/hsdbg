@@ -281,6 +281,8 @@ newaction {
         os.rmdir("bin-int")
         os.rmdir(".vs")
         os.remove("Makefile")
+        os.remove("imgui.ini")
+        os.remove("compile_commands.json")
 
         local patterns = {
             "*.make",
