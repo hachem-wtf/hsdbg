@@ -6,11 +6,17 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <unordered_map>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace lldb
+{
+    class SBThread;
+}
 
 namespace Hsdbg
 {
@@ -59,6 +65,22 @@ namespace Hsdbg
         auto remove_trace(uint32_t id) -> bool;
         auto clear_traces() -> void;
         auto traces() const -> std::span<const FunctionTrace> { return m_traces; }
+
+        // time-ordered call spans for the flame chart, spanning every traced thread
+        auto timeline() const -> std::span<const TimelineSpan> { return m_timeline; }
+
+        // name behind a span's trace id, whether it came from a manual trace or
+        // from the automatic instrumentation buffer
+        auto span_label(uint32_t trace_id) const -> const char*;
+
+        // whether the running target was built with the hsdbg trace runtime, so
+        // every function is being timed automatically
+        auto instrumentation_active() const -> bool { return m_instr_available; }
+
+        // sampling profiler: no build changes, works on any binary. periodically
+        // pauses the running target and folds its call stacks into the timeline
+        auto set_sampling_enabled(bool enabled) -> void { m_sampling_enabled = enabled; }
+        auto sampling_enabled() const -> bool { return m_sampling_enabled; }
 
         // inspection
         auto threads() const -> std::span<const Thread> { return m_threads; }
@@ -129,7 +151,57 @@ namespace Hsdbg
         // called for a stop that trace breakpoints took part in; returns true when
         // the stop was purely for tracing and the process was resumed
         auto handle_trace_stop() -> bool;
+        auto record_trace_entry(FunctionTrace& trace, lldb::SBThread& thread) -> void;
+        auto record_trace_return(lldb::SBThread& thread) -> void;
         auto trace_now() const -> double;
+
+        // automatic tracing: read the target's instrumentation ring buffer and turn
+        // its enter/exit records into timeline spans
+        struct InstrRecord;
+        auto resolve_instrumentation() -> void;
+        auto read_instrumentation() -> void;
+        auto apply_instr_record(const InstrRecord& record) -> void;
+        auto intern_instr_function(uint64_t address) -> uint32_t;
+        auto symbol_load_address(const char* name) -> uint64_t;
+
+        // one instrumented call still on a thread's stack, waiting for its exit
+        struct InstrOpenCall
+        {
+            uint32_t trace_id = 0;
+            uint64_t start_ns = 0;
+            size_t span_index = 0;
+        };
+
+        // sampling profiler internals
+        auto maybe_request_sample() -> void;
+        auto take_sample_and_resume() -> bool;
+        auto take_sample() -> void;
+        auto fold_sample(uint64_t thread_id, const std::vector<uint32_t>& stack, double now) -> void;
+        auto intern_named_function(std::string_view name) -> uint32_t;
+
+        // one frame currently open on a thread while folding samples into bars
+        struct OpenSample
+        {
+            uint32_t trace_id = 0;
+            size_t span_index = 0;
+        };
+
+        // a temporary breakpoint at a call's return address, so the matching exit
+        // can be timed; created lazily and torn down when the process restarts
+        auto ensure_return_breakpoint(uint64_t address) -> int32_t;
+        auto clear_return_breakpoints() -> void;
+
+        // one in-flight call waiting for its return to be seen
+        struct PendingCall
+        {
+            uint32_t trace_id = 0;
+            uint64_t thread_id = 0;
+            uint64_t return_pc = 0;
+            uint64_t frame_sp = 0;
+            double start = 0.0;
+            size_t call_index = 0;
+            size_t span_index = 0;
+        };
 
         std::unique_ptr<Session> m_session;
 
@@ -144,6 +216,11 @@ namespace Hsdbg
 
         std::vector<FunctionTrace> m_traces;
         uint32_t m_next_trace_id = 1;
+        std::vector<PendingCall> m_pending_calls;
+        std::vector<TimelineSpan> m_timeline;
+
+        // return address -> lldb breakpoint id, so call sites share one breakpoint
+        std::unordered_map<uint64_t, int32_t> m_return_breakpoints;
 
         std::vector<Thread> m_threads;
         std::vector<StackFrame> m_call_stack;
@@ -162,5 +239,25 @@ namespace Hsdbg
         uint64_t m_resident_memory = 0;
 
         std::chrono::steady_clock::time_point m_trace_epoch = std::chrono::steady_clock::now();
+
+        // automatic instrumentation reader state, all rebuilt each run
+        bool m_instr_checked = false;
+        bool m_instr_available = false;
+        uint64_t m_instr_head_addr = 0;
+        uint64_t m_instr_records_addr = 0;
+        uint64_t m_instr_capacity = 0;
+        uint64_t m_instr_read_count = 0;
+        uint64_t m_instr_base_ns = 0;
+        bool m_instr_base_set = false;
+        std::unordered_map<uint64_t, uint32_t> m_instr_functions;             // address -> trace id
+        std::unordered_map<uint32_t, std::string> m_instr_names;             // trace id -> name
+        std::unordered_map<uint64_t, std::vector<InstrOpenCall>> m_instr_stacks; // thread -> open calls
+
+        // sampling profiler state, also rebuilt each run
+        bool m_sampling_enabled = false;
+        bool m_sample_pending = false;
+        std::chrono::steady_clock::time_point m_sample_last{};
+        std::unordered_map<std::string, uint32_t> m_sample_functions;       // name -> trace id
+        std::unordered_map<uint64_t, std::vector<OpenSample>> m_sample_stacks; // thread -> open frames
     };
 }

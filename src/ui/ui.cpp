@@ -16,6 +16,7 @@
 #include <cfloat>
 #include <filesystem>
 #include <format>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -38,6 +39,8 @@ namespace Hsdbg
         constexpr const char* PANEL_DISASSEMBLY = "disassembly";
         constexpr const char* PANEL_CONSOLE = "console";
         constexpr const char* PANEL_PROFILER = "profiler";
+        constexpr const char* PANEL_TIMELINE = "timeline";
+        constexpr const char* PANEL_MACROS = "macros";
 
         constexpr const char* LOAD_TARGET_POPUP = "load target";
 
@@ -614,6 +617,17 @@ namespace Hsdbg
         ImGui::End();
 
         draw_source_panel(debugger);
+
+        // a click on a highlighted macro in the source view loads it into the
+        // macros panel, brings the panel up and jumps its focus there
+        if (std::optional<std::string> request = m_source_view.take_macro_request())
+        {
+            m_macro_input = std::move(*request);
+            m_macro_level = 0;
+            m_visible.macros = true;
+            m_focus_macros = true;
+        }
+
         draw_breakpoints_panel(debugger);
         draw_call_stack_panel(debugger);
         draw_source_tree_panel(debugger);
@@ -624,6 +638,8 @@ namespace Hsdbg
         draw_disassembly_panel(debugger);
         draw_console_panel(debugger);
         draw_profiler_panel(debugger);
+        draw_timeline_panel(debugger);
+        draw_macros_panel(debugger);
 
         if (m_visible.demo)
             ImGui::ShowDemoWindow(&m_visible.demo);
@@ -657,6 +673,12 @@ namespace Hsdbg
             ImGui::SetWindowFocus(PANEL_BREAKPOINTS);
             m_focus_breakpoints = false;
         }
+
+        if (m_focus_macros)
+        {
+            ImGui::SetWindowFocus(PANEL_MACROS);
+            m_focus_macros = false;
+        }
     }
 
     auto Ui::build_default_layout(uint32_t dockspace_id) -> void
@@ -678,6 +700,7 @@ namespace Hsdbg
 
         ImGui::DockBuilderDockWindow(PANEL_SOURCE, center_id);
         ImGui::DockBuilderDockWindow(PANEL_DISASSEMBLY, center_id);
+        ImGui::DockBuilderDockWindow(PANEL_TIMELINE, center_id);
         ImGui::DockBuilderDockWindow(PANEL_SOURCE_TREE, left_top_id);
         ImGui::DockBuilderDockWindow(PANEL_THREADS, left_top_id);
         ImGui::DockBuilderDockWindow(PANEL_SYMBOLS, left_bottom_id);
@@ -687,6 +710,7 @@ namespace Hsdbg
         ImGui::DockBuilderDockWindow(PANEL_BREAKPOINTS, bottom_id);
         ImGui::DockBuilderDockWindow(PANEL_CONSOLE, bottom_id);
         ImGui::DockBuilderDockWindow(PANEL_PROFILER, bottom_id);
+        ImGui::DockBuilderDockWindow(PANEL_MACROS, bottom_id);
 
         ImGui::DockBuilderFinish(dockspace_id);
     }
@@ -769,6 +793,8 @@ namespace Hsdbg
             ImGui::MenuItem(PANEL_DISASSEMBLY, nullptr, &m_visible.disassembly);
             ImGui::MenuItem(PANEL_CONSOLE, nullptr, &m_visible.console);
             ImGui::MenuItem(PANEL_PROFILER, nullptr, &m_visible.profiler);
+            ImGui::MenuItem(PANEL_TIMELINE, nullptr, &m_visible.timeline);
+            ImGui::MenuItem(PANEL_MACROS, nullptr, &m_visible.macros);
 
             ImGui::Separator();
 
@@ -1770,10 +1796,13 @@ namespace Hsdbg
                 constexpr ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
                                                   ImGuiTableFlags_SizingStretchProp;
 
-                if (ImGui::BeginTable("##traces", 3, flags))
+                if (ImGui::BeginTable("##traces", 6, flags))
                 {
                     ImGui::TableSetupColumn("function");
-                    ImGui::TableSetupColumn("calls", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+                    ImGui::TableSetupColumn("calls", ImGuiTableColumnFlags_WidthFixed, 52.0f);
+                    ImGui::TableSetupColumn("avg", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+                    ImGui::TableSetupColumn("min", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+                    ImGui::TableSetupColumn("max", ImGuiTableColumnFlags_WidthFixed, 72.0f);
                     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.0f);
                     ImGui::TableHeadersRow();
 
@@ -1781,6 +1810,11 @@ namespace Hsdbg
 
                     for (const FunctionTrace& trace : traces)
                     {
+                        // milliseconds read easier than the seconds we store
+                        const double avg_ms = trace.completed_count > 0
+                            ? trace.total_time / static_cast<double>(trace.completed_count) * 1000.0
+                            : 0.0;
+
                         ImGui::TableNextRow();
 
                         ImGui::TableNextColumn();
@@ -1788,6 +1822,24 @@ namespace Hsdbg
 
                         ImGui::TableNextColumn();
                         ImGui::Text("%llu", static_cast<unsigned long long>(trace.call_count));
+
+                        ImGui::TableNextColumn();
+                        if (trace.completed_count > 0)
+                            ImGui::Text("%.3f ms", avg_ms);
+                        else
+                            ImGui::TextDisabled("-");
+
+                        ImGui::TableNextColumn();
+                        if (trace.completed_count > 0)
+                            ImGui::Text("%.3f ms", trace.min_time * 1000.0);
+                        else
+                            ImGui::TextDisabled("-");
+
+                        ImGui::TableNextColumn();
+                        if (trace.completed_count > 0)
+                            ImGui::Text("%.3f ms", trace.max_time * 1000.0);
+                        else
+                            ImGui::TextDisabled("-");
 
                         ImGui::TableNextColumn();
                         ImGui::PushID(static_cast<int>(trace.id));
@@ -1823,6 +1875,236 @@ namespace Hsdbg
                 ImGui::PlotLines("##fps", fps.values(), fps.count(), fps.offset(),
                                  fps_overlay.c_str(), 0.0f, FLT_MAX, ImVec2(-1.0f, 70.0f));
             }
+        }
+
+        ImGui::End();
+    }
+
+    auto Ui::draw_timeline_panel(Debugger& debugger) -> void
+    {
+        if (!m_visible.timeline)
+            return;
+
+        if (ImGui::Begin(PANEL_TIMELINE, &m_visible.timeline))
+        {
+            const std::span<const TimelineSpan> spans = debugger.timeline();
+
+            if (debugger.instrumentation_active())
+            {
+                ImGui::TextDisabled("instrumented: every function traced automatically");
+            }
+            else
+            {
+                bool sampling = debugger.sampling_enabled();
+                if (ImGui::Checkbox("sample while running", &sampling))
+                    debugger.set_sampling_enabled(sampling);
+
+                ImGui::SameLine();
+                ImGui::TextDisabled("(any binary, approximate)");
+            }
+
+            if (spans.empty())
+            {
+                ImGui::TextDisabled("run an instrumented target, or trace functions, then stop to see calls");
+            }
+            else
+            {
+                // resolve a trace id to its function name for labels and tooltips
+                const auto name_of = [&](uint32_t trace_id) -> const char*
+                {
+                    return debugger.span_label(trace_id);
+                };
+
+                // the time range to fit and how tall the call stack gets
+                double t_min = spans.front().start;
+                double t_max = t_min;
+                uint32_t max_depth = 0;
+
+                for (const TimelineSpan& span : spans)
+                {
+                    t_min = std::min(t_min, span.start);
+                    t_max = std::max(t_max, span.start + span.duration);
+                    max_depth = std::max(max_depth, span.depth);
+                }
+
+                const double range = std::max(t_max - t_min, 1.0e-6);
+
+                ImGui::Text("%.3f ms total   %zu calls", range * 1000.0, spans.size());
+
+                constexpr float row_height = 20.0f;
+                const float rows = static_cast<float>(max_depth + 1);
+
+                const ImVec2 origin = ImGui::GetCursorScreenPos();
+                const ImVec2 avail = ImGui::GetContentRegionAvail();
+
+                const float canvas_w = std::max(avail.x, 1.0f);
+                const float canvas_h = std::max(avail.y, rows * row_height + 4.0f);
+
+                // claim the region so hovering resolves against it
+                ImGui::InvisibleButton("##timeline_canvas", ImVec2(canvas_w, canvas_h));
+                const bool canvas_hovered = ImGui::IsItemHovered();
+
+                ImDrawList* draw = ImGui::GetWindowDrawList();
+                draw->PushClipRect(origin, ImVec2(origin.x + canvas_w, origin.y + canvas_h), true);
+
+                const float scale = canvas_w / static_cast<float>(range); // pixels per second
+                const float baseline = origin.y + canvas_h;               // row 0 rests on the bottom
+
+                const ImVec2 mouse = ImGui::GetMousePos();
+
+                for (const TimelineSpan& span : spans)
+                {
+                    const float x0 = origin.x + static_cast<float>((span.start - t_min) * scale);
+                    const float width = std::max(1.0f, static_cast<float>(span.duration * scale));
+                    const float y1 = baseline - static_cast<float>(span.depth) * row_height;
+                    const float y0 = y1 - (row_height - 2.0f);
+
+                    const ImU32 fill = ImColor::HSV(span.trace_id * 0.13f, 0.55f, 0.78f);
+
+                    draw->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + width, y1), fill, 2.0f);
+                    draw->AddRect(ImVec2(x0, y0), ImVec2(x0 + width, y1), IM_COL32(0, 0, 0, 90), 2.0f);
+
+                    if (width > 24.0f)
+                    {
+                        draw->PushClipRect(ImVec2(x0 + 2.0f, y0), ImVec2(x0 + width - 2.0f, y1), true);
+                        draw->AddText(ImVec2(x0 + 4.0f, y0 + 2.0f), IM_COL32(20, 20, 20, 255),
+                                      name_of(span.trace_id));
+                        draw->PopClipRect();
+                    }
+
+                    const bool over = canvas_hovered && mouse.x >= x0 && mouse.x <= x0 + width &&
+                                      mouse.y >= y0 && mouse.y <= y1;
+
+                    if (over)
+                    {
+                        ImGui::BeginTooltip();
+                        ImGui::TextUnformatted(name_of(span.trace_id));
+                        ImGui::Text("start %.3f ms", (span.start - t_min) * 1000.0);
+                        if (span.duration > 0.0)
+                            ImGui::Text("duration %.3f ms", span.duration * 1000.0);
+                        else
+                            ImGui::TextDisabled("running...");
+                        ImGui::EndTooltip();
+                    }
+                }
+
+                draw->PopClipRect();
+            }
+        }
+
+        ImGui::End();
+    }
+
+    auto Ui::draw_macros_panel(Debugger& /*debugger*/) -> void
+    {
+        if (!m_visible.macros)
+            return;
+
+        if (ImGui::Begin(PANEL_MACROS, &m_visible.macros))
+        {
+            const MacroTable& table = m_source_view.macros();
+
+            ImGui::TextDisabled("unroll a #define one layer per level");
+
+            ImGui::SetNextItemWidth(-FLT_MIN);
+
+            if (ImGui::InputTextWithHint("##macro_input",
+                                         "click a macro in source, or type one like MAX(a, b)",
+                                         &m_macro_input))
+                m_macro_level = 0;
+
+            if (table.empty())
+                ImGui::TextDisabled("no #define macros found in the open source file");
+
+            if (m_macro_input.empty())
+            {
+                ImGui::End();
+                return;
+            }
+
+            const MacroExpansion expansion = expand_stages(table, m_macro_input);
+            const int max_level = static_cast<int>(expansion.levels.size()) - 1;
+
+            m_macro_level = std::clamp(m_macro_level, 0, max_level);
+
+            ImGui::BeginDisabled(m_macro_level <= 0);
+            if (ImGui::ArrowButton("##macro_prev", ImGuiDir_Left))
+                --m_macro_level;
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+
+            ImGui::BeginDisabled(m_macro_level >= max_level);
+            if (ImGui::ArrowButton("##macro_next", ImGuiDir_Right))
+                ++m_macro_level;
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+
+            if (max_level > 0)
+            {
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x -
+                                        ImGui::CalcTextSize("full reset").x -
+                                        ImGui::GetStyle().FramePadding.x * 6.0f -
+                                        ImGui::GetStyle().ItemSpacing.x * 2.0f);
+                ImGui::SliderInt("##macro_level", &m_macro_level, 0, max_level, "level %d");
+            }
+            else
+            {
+                ImGui::TextDisabled("nothing to expand here");
+                ImGui::SameLine();
+            }
+
+            ImGui::SameLine();
+
+            if (ImGui::SmallButton("full"))
+                m_macro_level = max_level;
+
+            ImGui::SameLine();
+
+            if (ImGui::SmallButton("reset"))
+                m_macro_level = 0;
+
+            // status: where we are, and whether the tail is truly the fixpoint
+            if (max_level == 0)
+                ImGui::TextDisabled("already fully expanded");
+            else if (m_macro_level == max_level && expansion.fully_expanded())
+                ImGui::TextDisabled("level %d of %d — fully expanded", m_macro_level, max_level);
+            else if (m_macro_level == max_level)
+                ImGui::TextDisabled("level %d — stopped at the expansion cap", m_macro_level);
+            else
+                ImGui::TextDisabled("level %d of %d", m_macro_level, max_level);
+
+            // which macros the next layer will unroll, so the step reads ahead
+            if (m_macro_level < max_level)
+            {
+                const std::vector<std::string>& next =
+                    expansion.expanded[static_cast<size_t>(m_macro_level) + 1];
+
+                if (!next.empty())
+                {
+                    std::string names;
+
+                    for (const std::string& name : next)
+                    {
+                        if (!names.empty())
+                            names += ", ";
+
+                        names += name;
+                    }
+
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("| next: %s", names.c_str());
+                }
+            }
+
+            ImGui::Separator();
+
+            m_macro_output = expansion.levels[static_cast<size_t>(m_macro_level)];
+
+            ImGui::InputTextMultiline("##macro_output", &m_macro_output,
+                                      ImGui::GetContentRegionAvail(),
+                                      ImGuiInputTextFlags_ReadOnly);
         }
 
         ImGui::End();

@@ -103,7 +103,8 @@ namespace Hsdbg
         // splits every line into contiguous coloured spans. the whole file is
         // walked in order so a block comment opened on one line stays open on the
         // next, which a per-line pass could not know
-        auto highlight_lines(const std::vector<std::string>& lines, Language language)
+        auto highlight_lines(const std::vector<std::string>& lines, Language language,
+                             const MacroTable& macros)
             -> std::vector<std::vector<SourceSpan>>
         {
             std::vector<std::vector<SourceSpan>> out(lines.size());
@@ -265,9 +266,17 @@ namespace Hsdbg
                         while (at < size && is_word(line[at]))
                             ++at;
 
-                        if (const SyntaxKind kind = classify_word(
-                                std::string_view(line).substr(start, at - start), language);
-                            kind != SyntaxKind::Default)
+                        const std::string_view word =
+                            std::string_view(line).substr(start, at - start);
+                        SyntaxKind kind = classify_word(word, language);
+
+                        // a plain identifier that names a #define is coloured as a
+                        // macro so it reads as expandable in the source view
+                        if (kind == SyntaxKind::Default && language == Language::Cpp &&
+                            macros.find(word) != nullptr)
+                            kind = SyntaxKind::Macro;
+
+                        if (kind != SyntaxKind::Default)
                         {
                             flush_default(start);
                             emit(start, at - start, kind);
@@ -321,6 +330,46 @@ namespace Hsdbg
         {
             return ImGui::CalcTextSize(std::to_string(line_count).c_str()).x;
         }
+
+        // grab a macro invocation out of a line starting at the name: the name
+        // alone for an object-like use, or the name plus a balanced argument list
+        // for a function-like one. a call that runs off the end of the line falls
+        // back to the bare name rather than guessing where it closes
+        auto capture_invocation(const std::string& line, uint32_t start) -> std::string
+        {
+            const size_t size = line.size();
+            size_t at = start;
+
+            while (at < size && is_word(line[at]))
+                ++at;
+
+            size_t paren = at;
+
+            while (paren < size && std::isspace(static_cast<unsigned char>(line[paren])) != 0)
+                ++paren;
+
+            if (paren < size && line[paren] == '(')
+            {
+                int depth = 0;
+
+                for (size_t i = paren; i < size; ++i)
+                {
+                    if (line[i] == '(')
+                    {
+                        ++depth;
+                    }
+                    else if (line[i] == ')')
+                    {
+                        --depth;
+
+                        if (depth == 0)
+                            return line.substr(start, i + 1 - start);
+                    }
+                }
+            }
+
+            return line.substr(start, at - start);
+        }
     }
 
     auto SourceView::open(const std::filesystem::path& path) -> Result<void>
@@ -345,7 +394,15 @@ namespace Hsdbg
         m_path = path;
         m_lines = std::move(lines);
         m_highlight = language.has_value();
-        m_spans = language ? highlight_lines(m_lines, *language)
+
+        // gather the file's #defines (chasing local quote includes) so macro
+        // names highlight and the macros panel has something to expand
+        m_macros.clear();
+
+        if (language == Language::Cpp)
+            m_macros.build(m_lines, path.parent_path());
+
+        m_spans = language ? highlight_lines(m_lines, *language, m_macros)
                            : std::vector<std::vector<SourceSpan>>{};
         m_path_input = path.string();
         m_error.clear();
@@ -361,9 +418,18 @@ namespace Hsdbg
         m_path.clear();
         m_lines.clear();
         m_spans.clear();
+        m_macros.clear();
+        m_macro_request.reset();
         m_highlight = false;
         m_error.clear();
         m_highlighted_line = 0;
+    }
+
+    auto SourceView::take_macro_request() -> std::optional<std::string>
+    {
+        std::optional<std::string> request = std::move(m_macro_request);
+        m_macro_request.reset();
+        return request;
     }
 
     auto SourceView::set_highlighted_line(uint32_t line) -> void
@@ -541,6 +607,10 @@ namespace Hsdbg
                         {
                             ImGui::TextUnformatted(begin, end);
                         }
+                        else if (span.kind == SyntaxKind::Macro)
+                        {
+                            draw_macro_span(draw_list, text, span);
+                        }
                         else
                         {
                             ImGui::PushStyleColor(ImGuiCol_Text,
@@ -556,5 +626,66 @@ namespace Hsdbg
         clipper.End();
 
         ImGui::EndChild();
+    }
+
+    auto SourceView::draw_macro_span(ImDrawList* draw_list, const std::string& line,
+                                     const SourceSpan& span) -> void
+    {
+        const char* const begin = line.c_str() + span.start;
+        const char* const end = begin + span.length;
+        const ImU32 color = m_syntax_colors[static_cast<size_t>(SyntaxKind::Macro)];
+
+        ImGui::PushStyleColor(ImGuiCol_Text, color);
+        ImGui::TextUnformatted(begin, end);
+        ImGui::PopStyleColor();
+
+        if (!ImGui::IsItemHovered())
+            return;
+
+        // underline on hover so the name reads as a link
+        const ImVec2 rect_min = ImGui::GetItemRectMin();
+        const ImVec2 rect_max = ImGui::GetItemRectMax();
+        draw_list->AddLine(ImVec2(rect_min.x, rect_max.y - 1.0f),
+                           ImVec2(rect_max.x, rect_max.y - 1.0f), color);
+
+        const std::string invocation = capture_invocation(line, span.start);
+        const MacroExpansion expansion = expand_stages(m_macros, invocation);
+
+        ImGui::BeginTooltip();
+
+        ImGui::PushStyleColor(ImGuiCol_Text, color);
+        ImGui::TextUnformatted(invocation.c_str());
+        ImGui::PopStyleColor();
+
+        ImGui::Separator();
+
+        std::string preview = expansion.levels.back();
+
+        if (constexpr size_t limit = 240; preview.size() > limit)
+        {
+            preview.resize(limit);
+            preview += " ...";
+        }
+
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted(preview.c_str());
+        ImGui::PopTextWrapPos();
+
+        ImGui::Spacing();
+
+        const size_t steps = expansion.levels.size() - 1;
+
+        if (steps == 0)
+            ImGui::TextDisabled("no expansion");
+        else if (!expansion.fully_expanded())
+            ImGui::TextDisabled("%zu+ levels — click to step through", steps);
+        else
+            ImGui::TextDisabled("%zu level%s — click to step through", steps,
+                                steps == 1 ? "" : "s");
+
+        ImGui::EndTooltip();
+
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            m_macro_request = invocation;
     }
 }

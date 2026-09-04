@@ -742,11 +742,33 @@ namespace Hsdbg
         m_process_id = process.GetProcessID();
         m_stop_reason = StopReason::None;
 
-        // each run is timed from its own start, so drop whatever the last run left
+        // each run is timed from its own start, so drop whatever the last run left,
+        // including return breakpoints whose addresses die with the old process
         m_trace_epoch = std::chrono::steady_clock::now();
+        clear_return_breakpoints();
+        m_timeline.clear();
+
+        // instrumentation lives in the process, so a fresh run re-resolves it and
+        // starts its record count and per-thread stacks over
+        m_instr_checked = false;
+        m_instr_available = false;
+        m_instr_read_count = 0;
+        m_instr_base_set = false;
+        m_instr_functions.clear();
+        m_instr_names.clear();
+        m_instr_stacks.clear();
+
+        m_sample_pending = false;
+        m_sample_functions.clear();
+        m_sample_stacks.clear();
+
         for (FunctionTrace& trace : m_traces)
         {
             trace.call_count = 0;
+            trace.completed_count = 0;
+            trace.total_time = 0.0;
+            trace.min_time = 0.0;
+            trace.max_time = 0.0;
             trace.calls.clear();
         }
 
@@ -1263,6 +1285,7 @@ namespace Hsdbg
         pump_events();
         sync_breakpoints();
         sample_process_stats();
+        maybe_request_sample();
     }
 
     auto Debugger::sample_process_stats() -> void
@@ -1359,6 +1382,34 @@ namespace Hsdbg
         m_traces.clear();
     }
 
+    auto Debugger::ensure_return_breakpoint(uint64_t address) -> int32_t
+    {
+        if (const auto entry = m_return_breakpoints.find(address); entry != m_return_breakpoints.end())
+            return entry->second;
+
+        lldb::SBBreakpoint created = m_session->target.BreakpointCreateByAddress(address);
+        if (!created.IsValid())
+            return 0;
+
+        created.SetEnabled(true);
+
+        const int32_t id = created.GetID();
+        m_return_breakpoints.emplace(address, id);
+        return id;
+    }
+
+    auto Debugger::clear_return_breakpoints() -> void
+    {
+        if (m_session->target.IsValid())
+        {
+            for (const auto& [address, id] : m_return_breakpoints)
+                m_session->target.BreakpointDelete(id);
+        }
+
+        m_return_breakpoints.clear();
+        m_pending_calls.clear();
+    }
+
     auto Debugger::handle_trace_stop() -> bool
     {
         if (m_traces.empty())
@@ -1377,39 +1428,44 @@ namespace Hsdbg
 
             const lldb::StopReason reason = thread.GetStopReason();
 
-            if (reason == lldb::eStopReasonBreakpoint)
-            {
-                // the stop reason carries (breakpoint id, location id) pairs
-                const size_t pairs = thread.GetStopReasonDataCount() / 2;
-
-                for (size_t pair = 0; pair < pairs; ++pair)
-                {
-                    const auto backend_id =
-                        static_cast<int32_t>(thread.GetStopReasonDataAtIndex(pair * 2));
-
-                    const auto trace = std::ranges::find(m_traces, backend_id,
-                                                         &FunctionTrace::entry_backend_id);
-
-                    if (trace != m_traces.end() && backend_id != 0)
-                    {
-                        trace->call_count += 1;
-
-                        if (trace->calls.size() < MAX_TRACE_CALLS)
-                            trace->calls.push_back(TraceCall{ trace_now(), 0.0 });
-
-                        any_trace = true;
-                    }
-                    else
-                    {
-                        // a real breakpoint the user set
-                        any_other = true;
-                    }
-                }
-            }
-            else if (reason != lldb::eStopReasonNone && reason != lldb::eStopReasonInvalid)
+            if (reason != lldb::eStopReasonBreakpoint)
             {
                 // a signal, exception or completed step: a genuine stop
-                any_other = true;
+                if (reason != lldb::eStopReasonNone && reason != lldb::eStopReasonInvalid)
+                    any_other = true;
+
+                continue;
+            }
+
+            // the stop reason carries (breakpoint id, location id) pairs
+            const size_t pairs = thread.GetStopReasonDataCount() / 2;
+
+            for (size_t pair = 0; pair < pairs; ++pair)
+            {
+                const auto backend_id =
+                    static_cast<int32_t>(thread.GetStopReasonDataAtIndex(pair * 2));
+
+                const auto trace = std::ranges::find(m_traces, backend_id,
+                                                     &FunctionTrace::entry_backend_id);
+
+                const bool is_return = std::ranges::any_of(m_return_breakpoints,
+                                                           [&](const auto& kv) { return kv.second == backend_id; });
+
+                if (trace != m_traces.end() && backend_id != 0)
+                {
+                    record_trace_entry(*trace, thread);
+                    any_trace = true;
+                }
+                else if (is_return)
+                {
+                    record_trace_return(thread);
+                    any_trace = true;
+                }
+                else
+                {
+                    // a real breakpoint the user set
+                    any_other = true;
+                }
             }
         }
 
@@ -1421,6 +1477,402 @@ namespace Hsdbg
         }
 
         return false;
+    }
+
+    auto Debugger::record_trace_entry(FunctionTrace& trace, lldb::SBThread& thread) -> void
+    {
+        const double start = trace_now();
+
+        trace.call_count += 1;
+
+        size_t call_index = MAX_TRACE_CALLS;
+        if (trace.calls.size() < MAX_TRACE_CALLS)
+        {
+            call_index = trace.calls.size();
+            trace.calls.push_back(TraceCall{ start, 0.0 });
+        }
+
+        // the breakpoint sits past the prologue, so frame 1 is a settled caller
+        // whose pc is the address this call will return to
+        lldb::SBFrame caller = thread.GetFrameAtIndex(1);
+        if (!caller.IsValid())
+            return;
+
+        const uint64_t thread_id = thread.GetThreadID();
+
+        // nesting is how many traced calls are already open on this thread; the
+        // outermost one sits on row zero and children stack above it
+        const auto depth = static_cast<uint32_t>(std::ranges::count(
+            m_pending_calls, thread_id, &PendingCall::thread_id));
+
+        size_t span_index = MAX_TRACE_CALLS;
+        if (m_timeline.size() < MAX_TRACE_CALLS)
+        {
+            span_index = m_timeline.size();
+            m_timeline.push_back(TimelineSpan{ trace.id, thread_id, start, 0.0, depth });
+        }
+
+        PendingCall pending;
+        pending.trace_id = trace.id;
+        pending.thread_id = thread_id;
+        pending.return_pc = caller.GetPC();
+        pending.frame_sp = caller.GetSP();
+        pending.start = start;
+        pending.call_index = call_index;
+        pending.span_index = span_index;
+
+        m_pending_calls.push_back(pending);
+        ensure_return_breakpoint(pending.return_pc);
+    }
+
+    auto Debugger::record_trace_return(lldb::SBThread& thread) -> void
+    {
+        lldb::SBFrame frame = thread.GetFrameAtIndex(0);
+        if (!frame.IsValid())
+            return;
+
+        const uint64_t pc = frame.GetPC();
+        const uint64_t sp = frame.GetSP();
+        const uint64_t thread_id = thread.GetThreadID();
+        const double now = trace_now();
+
+        // walk newest first so a recursive call matches its own activation
+        for (auto entry = m_pending_calls.rbegin(); entry != m_pending_calls.rend(); ++entry)
+        {
+            if (entry->thread_id != thread_id || entry->return_pc != pc || entry->frame_sp != sp)
+                continue;
+
+            const double duration = now - entry->start;
+
+            if (const auto trace = std::ranges::find(m_traces, entry->trace_id, &FunctionTrace::id);
+                trace != m_traces.end())
+            {
+                if (entry->call_index < trace->calls.size())
+                    trace->calls[entry->call_index].duration = duration;
+
+                if (entry->span_index < m_timeline.size())
+                    m_timeline[entry->span_index].duration = duration;
+
+                trace->completed_count += 1;
+                trace->total_time += duration;
+                trace->max_time = std::max(trace->max_time, duration);
+                trace->min_time = trace->completed_count == 1 ? duration
+                                                              : std::min(trace->min_time, duration);
+            }
+
+            m_pending_calls.erase(std::next(entry).base());
+            break;
+        }
+    }
+
+    // mirrors HsdbgTraceRecord in ext/hsdbg_trace/hsdbg_trace.h; that header is the
+    // source of truth for this 32-byte layout
+    struct Debugger::InstrRecord
+    {
+        uint64_t timestamp_ns;
+        uint64_t function;
+        uint64_t thread_id;
+        uint32_t kind;
+        uint32_t reserved;
+    };
+
+    auto Debugger::symbol_load_address(const char* name) -> uint64_t
+    {
+        lldb::SBSymbolContextList list = m_session->target.FindSymbols(name);
+
+        for (uint32_t index = 0; index < list.GetSize(); ++index)
+        {
+            lldb::SBSymbol symbol = list.GetContextAtIndex(index).GetSymbol();
+            if (!symbol.IsValid())
+                continue;
+
+            const uint64_t load = symbol.GetStartAddress().GetLoadAddress(m_session->target);
+            if (load != LLDB_INVALID_ADDRESS && load != 0)
+                return load;
+        }
+
+        return 0;
+    }
+
+    auto Debugger::resolve_instrumentation() -> void
+    {
+        const uint64_t head = symbol_load_address("hsdbg_trace_head");
+        const uint64_t records = symbol_load_address("hsdbg_trace_records");
+        const uint64_t capacity_addr = symbol_load_address("hsdbg_trace_capacity");
+
+        if (head == 0 || records == 0 || capacity_addr == 0)
+        {
+            // the target simply was not built with the trace runtime
+            m_instr_checked = true;
+            m_instr_available = false;
+            return;
+        }
+
+        lldb::SBError error;
+        uint64_t capacity = 0;
+        m_session->process.ReadMemory(capacity_addr, &capacity, sizeof(capacity), error);
+
+        if (!error.Success() || capacity == 0)
+            return; // memory not readable yet, try again on the next stop
+
+        m_instr_head_addr = head;
+        m_instr_records_addr = records;
+        m_instr_capacity = capacity;
+        m_instr_available = true;
+        m_instr_checked = true;
+
+        Log::info("debugger: function instrumentation active ({} record buffer)", capacity);
+    }
+
+    auto Debugger::read_instrumentation() -> void
+    {
+        if (!is_alive(m_session->process))
+            return;
+
+        if (!m_instr_checked)
+            resolve_instrumentation();
+
+        if (!m_instr_available)
+            return;
+
+        lldb::SBError error;
+        uint64_t head = 0;
+        m_session->process.ReadMemory(m_instr_head_addr, &head, sizeof(head), error);
+
+        if (!error.Success() || head <= m_instr_read_count)
+            return;
+
+        const uint64_t capacity = m_instr_capacity;
+
+        // if we fell further behind than the ring holds, only the newest survive
+        uint64_t start = m_instr_read_count;
+        if (head - start > capacity)
+            start = head - capacity;
+
+        const uint64_t total = head - start;
+        std::vector<InstrRecord> buffer(total);
+
+        // the live records wrap around the ring, so read up to two flat chunks
+        uint64_t read = 0;
+        while (read < total)
+        {
+            const uint64_t position = (start + read) % capacity;
+            const uint64_t chunk = std::min(total - read, capacity - position);
+            const uint64_t address = m_instr_records_addr + position * sizeof(InstrRecord);
+
+            lldb::SBError chunk_error;
+            const size_t got = m_session->process.ReadMemory(
+                address, buffer.data() + read, chunk * sizeof(InstrRecord), chunk_error);
+
+            if (!chunk_error.Success() || got != chunk * sizeof(InstrRecord))
+                return; // leave m_instr_read_count untouched and retry next stop
+
+            read += chunk;
+        }
+
+        for (const InstrRecord& record : buffer)
+            apply_instr_record(record);
+
+        m_instr_read_count = head;
+    }
+
+    auto Debugger::apply_instr_record(const InstrRecord& record) -> void
+    {
+        if (!m_instr_base_set)
+        {
+            m_instr_base_ns = record.timestamp_ns;
+            m_instr_base_set = true;
+        }
+
+        const double start = static_cast<double>(record.timestamp_ns - m_instr_base_ns) / 1.0e9;
+        const uint32_t id = intern_instr_function(record.function);
+
+        std::vector<InstrOpenCall>& stack = m_instr_stacks[record.thread_id];
+
+        if (record.kind == 0 /* enter */)
+        {
+            const auto depth = static_cast<uint32_t>(stack.size());
+
+            size_t span_index = m_timeline.size();
+            if (m_timeline.size() < MAX_TRACE_CALLS)
+                m_timeline.push_back(TimelineSpan{ id, record.thread_id, start, 0.0, depth });
+
+            stack.push_back(InstrOpenCall{ id, record.timestamp_ns, span_index });
+        }
+        else if (!stack.empty())
+        {
+            const InstrOpenCall open = stack.back();
+            stack.pop_back();
+
+            const double duration =
+                static_cast<double>(record.timestamp_ns - open.start_ns) / 1.0e9;
+
+            if (open.span_index < m_timeline.size())
+                m_timeline[open.span_index].duration = duration;
+        }
+    }
+
+    auto Debugger::intern_instr_function(uint64_t address) -> uint32_t
+    {
+        if (const auto entry = m_instr_functions.find(address); entry != m_instr_functions.end())
+            return entry->second;
+
+        std::string name;
+        lldb::SBAddress resolved = m_session->target.ResolveLoadAddress(address);
+
+        if (resolved.IsValid())
+        {
+            if (lldb::SBFunction function = resolved.GetFunction();
+                function.IsValid() && function.GetName() != nullptr)
+            {
+                name = function.GetName();
+            }
+            else if (lldb::SBSymbol symbol = resolved.GetSymbol();
+                     symbol.IsValid() && symbol.GetName() != nullptr)
+            {
+                name = symbol.GetName();
+            }
+        }
+
+        if (name.empty())
+            name = std::format("{:#x}", address);
+
+        const uint32_t id = m_next_trace_id++;
+        m_instr_functions.emplace(address, id);
+        m_instr_names.emplace(id, std::move(name));
+        return id;
+    }
+
+    auto Debugger::span_label(uint32_t trace_id) const -> const char*
+    {
+        if (const auto entry = m_instr_names.find(trace_id); entry != m_instr_names.end())
+            return entry->second.c_str();
+
+        const auto trace = std::ranges::find(m_traces, trace_id, &FunctionTrace::id);
+        if (trace != m_traces.end())
+            return trace->function.c_str();
+
+        return "?";
+    }
+
+    auto Debugger::intern_named_function(std::string_view name) -> uint32_t
+    {
+        std::string key(name);
+
+        if (const auto entry = m_sample_functions.find(key); entry != m_sample_functions.end())
+            return entry->second;
+
+        const uint32_t id = m_next_trace_id++;
+        m_sample_functions.emplace(key, id);
+        m_instr_names.emplace(id, std::move(key)); // shared id -> name store used by span_label
+        return id;
+    }
+
+    auto Debugger::maybe_request_sample() -> void
+    {
+        // instrumentation, when present, is the exact source and wins
+        if (!m_sampling_enabled || m_instr_available)
+            return;
+
+        if (!is_alive(m_session->process) || m_session->process.GetState() != lldb::eStateRunning)
+            return;
+
+        if (m_sample_pending)
+            return;
+
+        // update() runs once a frame, so this caps out near the frame rate; a
+        // short interval just means "as often as we can"
+        const auto now = std::chrono::steady_clock::now();
+        if (now - m_sample_last < std::chrono::milliseconds(5))
+            return;
+
+        m_sample_last = now;
+        m_session->process.Stop();
+        m_sample_pending = true;
+    }
+
+    auto Debugger::take_sample_and_resume() -> bool
+    {
+        // a real breakpoint landing at the same time is a genuine stop, not a sample
+        const uint32_t threads = m_session->process.GetNumThreads();
+        for (uint32_t index = 0; index < threads; ++index)
+        {
+            lldb::SBThread thread = m_session->process.GetThreadAtIndex(index);
+            if (thread.IsValid() && thread.GetStopReason() == lldb::eStopReasonBreakpoint)
+                return false;
+        }
+
+        take_sample();
+        m_session->process.Continue();
+        return true;
+    }
+
+    auto Debugger::take_sample() -> void
+    {
+        const double now = trace_now();
+        const uint32_t threads = m_session->process.GetNumThreads();
+
+        std::vector<uint32_t> stack;
+
+        for (uint32_t index = 0; index < threads; ++index)
+        {
+            lldb::SBThread thread = m_session->process.GetThreadAtIndex(index);
+            if (!thread.IsValid())
+                continue;
+
+            stack.clear();
+
+            // lldb numbers frames innermost-first, so walk from the top down to put
+            // the outermost call (main) at depth zero
+            const uint32_t frames = std::min(thread.GetNumFrames(), 64u);
+            for (int frame_index = static_cast<int>(frames) - 1; frame_index >= 0; --frame_index)
+            {
+                lldb::SBFrame frame = thread.GetFrameAtIndex(static_cast<uint32_t>(frame_index));
+                if (frame.IsValid())
+                    stack.push_back(intern_named_function(name_of(frame)));
+            }
+
+            fold_sample(thread.GetThreadID(), stack, now);
+        }
+    }
+
+    auto Debugger::fold_sample(uint64_t thread_id, const std::vector<uint32_t>& stack, double now) -> void
+    {
+        std::vector<OpenSample>& open = m_sample_stacks[thread_id];
+
+        // how deep the new stack still matches the bars already open
+        size_t match = 0;
+        while (match < open.size() && match < stack.size() && open[match].trace_id == stack[match])
+            ++match;
+
+        // close every bar below the divergence point, deepest first
+        for (size_t depth = open.size(); depth-- > match;)
+        {
+            const size_t span = open[depth].span_index;
+            if (span < m_timeline.size())
+                m_timeline[span].duration = now - m_timeline[span].start;
+        }
+        open.resize(match);
+
+        // open a fresh bar for each newly seen frame
+        for (size_t depth = match; depth < stack.size(); ++depth)
+        {
+            size_t span_index = m_timeline.size();
+            if (m_timeline.size() < MAX_TRACE_CALLS)
+            {
+                m_timeline.push_back(TimelineSpan{ stack[depth], thread_id, now, 0.0,
+                                                   static_cast<uint32_t>(depth) });
+            }
+
+            open.push_back(OpenSample{ stack[depth], span_index });
+        }
+
+        // let still-open bars grow up to the current sample so they render live
+        for (const OpenSample& entry : open)
+        {
+            if (entry.span_index < m_timeline.size())
+                m_timeline[entry.span_index].duration = now - m_timeline[entry.span_index].start;
+        }
     }
 
     auto Debugger::require_stopped() const -> Result<void>
@@ -1495,9 +1947,18 @@ namespace Hsdbg
                 case lldb::eStateStopped:
                     if (m_state != TargetState::Stopped)
                     {
+                        // our own Stop() for a sample resolves here; clear the flag
+                        // up front so a coincident breakpoint cannot strand it
+                        const bool was_sampling = m_sample_pending;
+                        m_sample_pending = false;
+
                         // a trace-only stop records the call and resumes without
                         // ever surfacing to the user as a stop
                         if (handle_trace_stop())
+                            break;
+
+                        // likewise a sampling stop grabs the stacks and resumes
+                        if (was_sampling && take_sample_and_resume())
                             break;
 
                         on_stopped();
@@ -1610,6 +2071,10 @@ namespace Hsdbg
         refresh_frame_data();
 
         set_state(TargetState::Stopped);
+
+        // the process is settled, so drain whatever the instrumentation buffer has
+        // gathered since the last stop into the timeline
+        read_instrumentation();
 
         ++m_stop_count;
     }

@@ -51,6 +51,8 @@ namespace Hsdbg
             bool disassembly = true;
             bool console = true;
             bool profiler = true;
+            bool timeline = true;
+            bool macros = true;
             bool demo = false;
         };
 
@@ -75,6 +77,8 @@ namespace Hsdbg
         auto draw_disassembly_panel(Debugger& debugger) -> void;
         auto draw_console_panel(Debugger& debugger) -> void;
         auto draw_profiler_panel(Debugger& debugger) -> void;
+        auto draw_timeline_panel(Debugger& debugger) -> void;
+        auto draw_macros_panel(Debugger& debugger) -> void;
 
         auto push_console(std::string line) -> void;
         auto report(const Result<void>& result, std::string_view action) -> void;
@@ -115,6 +119,12 @@ namespace Hsdbg
         std::string m_source_filter;
         std::string m_trace_input;
 
+        // macros panel: the invocation being unrolled, the current unroll depth,
+        // and the read-only buffer that shows the tokens at that depth
+        std::string m_macro_input;
+        std::string m_macro_output;
+        int m_macro_level = 0;
+
         uint64_t m_followed_stop = 0;
         std::filesystem::path m_followed_target;
 
@@ -123,6 +133,7 @@ namespace Hsdbg
         bool m_console_scroll_pending = false;
         bool m_load_target_pending = false;
         bool m_focus_breakpoints = false;
+        bool m_focus_macros = false;
         bool m_focus_symbols = false;
         bool m_focus_disassembly = false;
         bool m_scroll_to_program_counter = false;

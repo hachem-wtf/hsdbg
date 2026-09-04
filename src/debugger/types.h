@@ -167,6 +167,17 @@ namespace Hsdbg
         double duration = 0.0; // seconds spent inside the call
     };
 
+    // one call laid out for the flame chart: a horizontal bar whose x is the
+    // start time, width is the duration and row is how deeply it was nested
+    struct TimelineSpan
+    {
+        uint32_t trace_id = 0; // which traced function, also picks the colour
+        uint64_t thread_id = 0;
+        double start = 0.0;    // seconds since tracing began
+        double duration = 0.0; // seconds; zero while the call is still running
+        uint32_t depth = 0;    // 0 is the outermost call on its thread
+    };
+
     // a function the user asked to time. the debugger sets an internal breakpoint
     // on it that records each call without stopping the ui
     struct FunctionTrace
@@ -174,7 +185,15 @@ namespace Hsdbg
         uint32_t id = 0;
         std::string function;
         int32_t entry_backend_id = 0;
-        uint64_t call_count = 0;
+
+        uint64_t call_count = 0;      // entries seen
+        uint64_t completed_count = 0; // calls whose return was matched
+
+        // seconds, aggregated over completed calls
+        double total_time = 0.0;
+        double min_time = 0.0;
+        double max_time = 0.0;
+
         std::vector<TraceCall> calls;
     };
 }
