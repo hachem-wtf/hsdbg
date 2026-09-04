@@ -119,6 +119,180 @@ namespace Hsdbg
             return std::ranges::search(name, filter, equal).begin() != name.end();
         }
 
+        // the sixteen standard ansi colours, tuned to read on a dark console (the
+        // vs code terminal set); indices 0-7 are the normal colours, 8-15 bright
+        constexpr ImU32 ANSI_COLORS[16] = {
+            IM_COL32( 90,  90,  90, 255), IM_COL32(205,  49,  49, 255),
+            IM_COL32( 13, 188, 121, 255), IM_COL32(229, 229,  16, 255),
+            IM_COL32( 59, 142, 234, 255), IM_COL32(188,  63, 188, 255),
+            IM_COL32( 17, 168, 205, 255), IM_COL32(204, 204, 204, 255),
+            IM_COL32(127, 127, 127, 255), IM_COL32(241,  76,  76, 255),
+            IM_COL32( 35, 209, 139, 255), IM_COL32(245, 245,  67, 255),
+            IM_COL32( 96, 165, 250, 255), IM_COL32(214, 112, 214, 255),
+            IM_COL32( 41, 184, 219, 255), IM_COL32(255, 255, 255, 255),
+        };
+
+        // the colour an xterm 256-colour index maps to: the 16 base colours, then
+        // the 6x6x6 rgb cube, then the 24-step grey ramp
+        auto xterm_256_color(int index) -> ImU32
+        {
+            if (index < 16)
+                return ANSI_COLORS[index];
+
+            if (index < 232)
+            {
+                const int value = index - 16;
+                const auto step = [](int component)
+                {
+                    return component == 0 ? 0 : 55 + component * 40;
+                };
+
+                return IM_COL32(step(value / 36), step((value / 6) % 6), step(value % 6), 255);
+            }
+
+            const int grey = 8 + (index - 232) * 10;
+            return IM_COL32(grey, grey, grey, 255);
+        }
+
+        // the foreground state an SGR (colour) escape run leaves behind
+        struct AnsiStyle
+        {
+            int color = -1;       // 0-15 palette index, or -1 for the theme default
+            bool bold = false;
+            bool truecolor = false;
+            ImU32 rgb = 0;
+        };
+
+        // applies the numeric parameters of one "\x1b[ ... m" sequence to the style
+        auto apply_sgr(const std::string& text, size_t begin, size_t end, AnsiStyle& style) -> void
+        {
+            std::vector<int> params;
+            int value = 0;
+
+            for (size_t at = begin; at < end; ++at)
+            {
+                if (text[at] >= '0' && text[at] <= '9')
+                    value = value * 10 + (text[at] - '0');
+                else if (text[at] == ';')
+                {
+                    params.push_back(value);
+                    value = 0;
+                }
+            }
+
+            params.push_back(value); // a bare "\x1b[m" collapses to {0}, i.e. reset
+
+            for (size_t index = 0; index < params.size(); ++index)
+            {
+                const int code = params[index];
+
+                if (code == 0)
+                    style = AnsiStyle{};
+                else if (code == 1)
+                    style.bold = true;
+                else if (code == 22)
+                    style.bold = false;
+                else if (code == 39)
+                    style = AnsiStyle{ -1, style.bold, false, 0 };
+                else if (code >= 30 && code <= 37)
+                    style = AnsiStyle{ code - 30, style.bold, false, 0 };
+                else if (code >= 90 && code <= 97)
+                    style = AnsiStyle{ code - 90 + 8, style.bold, false, 0 };
+                else if ((code == 38 || code == 48) && index + 1 < params.size())
+                {
+                    // extended colour; 48 (background) is parsed but not applied
+                    const int mode = params[index + 1];
+
+                    if (mode == 5 && index + 2 < params.size())
+                    {
+                        if (code == 38)
+                        {
+                            style.truecolor = true;
+                            style.rgb = xterm_256_color(params[index + 2]);
+                        }
+                        index += 2;
+                    }
+                    else if (mode == 2 && index + 4 < params.size())
+                    {
+                        if (code == 38)
+                        {
+                            style.truecolor = true;
+                            style.rgb = IM_COL32(params[index + 2], params[index + 3],
+                                                 params[index + 4], 255);
+                        }
+                        index += 4;
+                    }
+                }
+            }
+        }
+
+        auto ansi_color(const AnsiStyle& style) -> std::optional<ImU32>
+        {
+            if (style.truecolor)
+                return style.rgb;
+
+            if (style.color < 0)
+                return std::nullopt; // leave the theme's default text colour in place
+
+            const int index = (style.bold && style.color < 8) ? style.color + 8 : style.color;
+            return ANSI_COLORS[index];
+        }
+
+        // renders one console line, honouring ansi SGR colour escapes and dropping
+        // any other control sequence so it never shows as garbage
+        auto draw_ansi_line(const std::string& line) -> void
+        {
+            AnsiStyle style;
+            bool first = true;
+            const size_t size = line.size();
+            size_t at = 0;
+
+            while (at < size)
+            {
+                if (line[at] == '\x1b' && at + 1 < size && line[at + 1] == '[')
+                {
+                    size_t final = at + 2;
+
+                    while (final < size && !(line[final] >= '@' && line[final] <= '~'))
+                        ++final;
+
+                    if (final < size && line[final] == 'm')
+                        apply_sgr(line, at + 2, final, style);
+
+                    at = final < size ? final + 1 : size;
+                    continue;
+                }
+
+                size_t run_end = line.find('\x1b', at);
+                if (run_end == std::string::npos)
+                    run_end = size;
+
+                if (run_end > at)
+                {
+                    if (!first)
+                        ImGui::SameLine(0.0f, 0.0f);
+
+                    first = false;
+
+                    const std::optional<ImU32> color = ansi_color(style);
+
+                    if (color)
+                        ImGui::PushStyleColor(ImGuiCol_Text, *color);
+
+                    ImGui::TextUnformatted(line.c_str() + at, line.c_str() + run_end);
+
+                    if (color)
+                        ImGui::PopStyleColor();
+                }
+
+                at = run_end;
+            }
+
+            // a line that was empty or only escapes still takes a row
+            if (first)
+                ImGui::TextUnformatted("");
+        }
+
         struct SourceNode
         {
             std::string name;
@@ -1961,10 +2135,10 @@ namespace Hsdbg
             if (ImGui::BeginChild("##console_output", ImVec2(0.0f, -input_height)))
             {
                 for (const std::string& line : debugger.console_output())
-                    ImGui::TextUnformatted(line.c_str());
+                    draw_ansi_line(line);
 
                 for (const std::string& line : m_console_lines)
-                    ImGui::TextUnformatted(line.c_str());
+                    draw_ansi_line(line);
 
                 if (m_console_scroll_pending)
                 {
