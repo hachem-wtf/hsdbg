@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <string>
 
 namespace Hsdbg
 {
@@ -9,9 +10,10 @@ namespace Hsdbg
     struct Preferences
     {
         // appearance
+        std::string theme = "midnight";      // stem of the selected assets/themes/*.toml
         float ui_scale = 1.0f;               // scales every font, 0.75 - 2.0
-        float accent[3] = { 0.30f, 0.72f, 0.78f }; // the teal that runs through the theme
-        float rounding = 4.0f;               // corner radius on frames, windows, tabs
+        float accent[3] = { 0.302f, 0.714f, 0.769f }; // seeded from the theme, then tweakable
+        float rounding = 6.0f;               // corner radius on frames, windows, tabs
         bool show_mascot = true;             // the crying-pepe in the toolbar
         float mascot_scale = 1.6f;           // mascot height as a multiple of a button
 

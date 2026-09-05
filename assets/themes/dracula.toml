@@ -1,0 +1,25 @@
+[theme]
+name = "Dracula"
+
+[palette]
+text     = "#F8F8F2"
+text_dim = "#6272A4"
+bg       = "#282A36"
+bg_low   = "#21222C"
+bg_high  = "#343746"
+surface  = "#44475A"
+border   = "#44475A"
+accent   = "#BD93F9"
+
+[style]
+rounding      = 7
+window_border = 1
+
+[syntax]
+keyword      = "#FF79C6"
+type         = "#8BE9FD"
+string       = "#F1FA8C"
+number       = "#BD93F9"
+comment      = "#6272A4"
+preprocessor = "#FFB86C"
+current_line = "#44475A"

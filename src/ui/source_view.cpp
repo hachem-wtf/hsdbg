@@ -98,9 +98,8 @@ namespace Hsdbg
             });
         }
 
-        // splits every line into contiguous coloured spans. the whole file is
-        // walked in order so a block comment opened on one line stays open on the
-        // next, which a per-line pass could not know
+        // one pass over the whole file (not per-line) so a block comment opened on
+        // one line stays open on the next
         auto highlight_lines(const std::vector<std::string>& lines, Language language,
                              const MacroTable& macros)
             -> std::vector<std::vector<SourceSpan>>
@@ -264,8 +263,7 @@ namespace Hsdbg
                         while (at < size && is_word(line[at]))
                             ++at;
 
-                        const std::string_view word =
-                            std::string_view(line).substr(start, at - start);
+                        const std::string_view word = std::string_view(line).substr(start, at - start);
                         SyntaxKind kind = classify_word(word, language);
 
                         // a plain identifier that names a #define is coloured as a
@@ -274,9 +272,8 @@ namespace Hsdbg
                             macros.find(word) != nullptr)
                             kind = SyntaxKind::Macro;
 
-                        // every word gets its own span, including plain identifiers:
-                        // isolating them lets the source view hit-test a name under
-                        // the cursor and show its live value
+                        // every word gets its own span (identifiers included) so the
+                        // view can hit-test a name under the cursor and show its value
                         flush_default(start);
                         emit(start, at - start, kind);
                         run = at;
@@ -382,10 +379,8 @@ namespace Hsdbg
             return text;
         }
 
-        // grab a macro invocation out of a line starting at the name: the name
-        // alone for an object-like use, or the name plus a balanced argument list
-        // for a function-like one. a call that runs off the end of the line falls
-        // back to the bare name rather than guessing where it closes
+        // grab a macro invocation from the name: bare name for object-like, name plus
+        // a balanced arg list for function-like; unbalanced falls back to the name
         auto capture_invocation(const std::string& line, uint32_t start) -> std::string
         {
             const size_t size = line.size();
@@ -504,25 +499,33 @@ namespace Hsdbg
 
         if (m_lines.empty())
         {
-            ImGui::TextDisabled("no source file open");
+            ImGui::TextDisabled("No source file open");
             return;
         }
 
+        // the code and its line-number gutter render in the monospace face; the
+        // open bar above stays in the ui font
+        if (m_mono_font != nullptr)
+            ImGui::PushFont(m_mono_font, 0.0f);
+
         draw_lines(debugger);
+
+        if (m_mono_font != nullptr)
+            ImGui::PopFont();
     }
 
     auto SourceView::draw_open_bar() -> void
     {
-        ImGui::SetNextItemWidth(-ImGui::CalcTextSize("open").x - ImGui::GetStyle().FramePadding.x * 4.0f);
+        ImGui::SetNextItemWidth(-ImGui::CalcTextSize("Open").x - ImGui::GetStyle().FramePadding.x * 4.0f);
 
         const bool submitted = ImGui::InputTextWithHint("##source_path",
-                                                        "path to a source file",
+                                                        "Path to a source file",
                                                         &m_path_input,
                                                         ImGuiInputTextFlags_EnterReturnsTrue);
 
         ImGui::SameLine();
 
-        if (ImGui::Button("open") || submitted)
+        if (ImGui::Button("Open") || submitted)
         {
             if (const auto result = open(m_path_input); !result)
             {
@@ -555,12 +558,11 @@ namespace Hsdbg
             m_scroll_to_highlight = false;
         }
 
-        // the selected frame's locals, but only when we are stopped in this very
-        // file (a non-zero highlight means show_frame put us here); used both to
-        // annotate lines and to answer a hover over a name
-        const std::span<const Variable> locals =
-            (debugger.is_stopped() && m_highlighted_line != 0) ? debugger.locals()
-                                                               : std::span<const Variable>{};
+        // the selected frame's locals, but only while stopped in this file (a non-zero
+        // highlight means show_frame put us here)
+        const std::span<const Variable> locals = debugger.is_stopped() && m_highlighted_line != 0
+                                                     ? debugger.locals()
+                                                     : std::span<const Variable>{};
 
         ImGuiListClipper clipper;
         clipper.Begin(static_cast<int>(m_lines.size()), text_height);
@@ -695,9 +697,8 @@ namespace Hsdbg
                     }
                 }
 
-                // trailing live values: the locals that appear on this line, shown
-                // only up to the line the pc sits on, since anything past it has
-                // not run yet and would read as a stale or unset value
+                // live values for locals on this line, shown only up to the pc —
+                // anything past it has not run yet and would read stale
                 if (!locals.empty() && line_number <= m_highlighted_line)
                 {
                     int shown = 0;
@@ -778,7 +779,7 @@ namespace Hsdbg
         const size_t steps = expansion.levels.size() - 1;
 
         if (steps == 0)
-            ImGui::TextDisabled("no expansion");
+            ImGui::TextDisabled("No expansion");
         else if (!expansion.fully_expanded())
             ImGui::TextDisabled("%zu+ levels — click to step through", steps);
         else

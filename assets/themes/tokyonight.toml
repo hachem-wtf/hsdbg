@@ -1,0 +1,25 @@
+[theme]
+name = "Tokyo Night"
+
+[palette]
+text     = "#C0CAF5"
+text_dim = "#737AA2"
+bg       = "#1A1B26"
+bg_low   = "#16161E"
+bg_high  = "#24283B"
+surface  = "#2F3549"
+border   = "#3B4261"
+accent   = "#7AA2F7"
+
+[style]
+rounding      = 6
+window_border = 1
+
+[syntax]
+keyword      = "#BB9AF7"
+type         = "#2AC3DE"
+string       = "#9ECE6A"
+number       = "#FF9E64"
+comment      = "#565F89"
+preprocessor = "#7DCFFF"
+current_line = "#292E42"

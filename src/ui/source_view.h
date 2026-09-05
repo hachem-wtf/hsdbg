@@ -10,6 +10,7 @@
 #include <vector>
 
 struct ImDrawList;
+struct ImFont;
 
 namespace Hsdbg
 {
@@ -53,6 +54,9 @@ namespace Hsdbg
         auto set_syntax_color(size_t kind, unsigned int color) -> void { m_syntax_colors[kind] = color; }
         auto set_current_line_color(unsigned int color) -> void { m_current_line_color = color; }
 
+        // the monospace face the code (and its gutter) is rendered in
+        auto set_mono_font(ImFont* font) -> void { m_mono_font = font; }
+
         auto path() const -> const std::filesystem::path& { return m_path; }
         auto line_count() const -> size_t { return m_lines.size(); }
         auto is_open() const -> bool { return !m_lines.empty(); }
@@ -79,6 +83,7 @@ namespace Hsdbg
         auto draw_macro_span(ImDrawList* draw_list, const std::string& line,
                              const SourceSpan& span) -> void;
 
+        ImFont* m_mono_font = nullptr;
         std::filesystem::path m_path;
         std::vector<std::string> m_lines;
         std::vector<std::vector<SourceSpan>> m_spans;

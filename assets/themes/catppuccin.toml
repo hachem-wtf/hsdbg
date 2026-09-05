@@ -1,0 +1,25 @@
+[theme]
+name = "Catppuccin Mocha"
+
+[palette]
+text     = "#CDD6F4"
+text_dim = "#7F849C"
+bg       = "#1E1E2E"
+bg_low   = "#181825"
+bg_high  = "#313244"
+surface  = "#45475A"
+border   = "#585B70"
+accent   = "#89B4FA"
+
+[style]
+rounding      = 7
+window_border = 1
+
+[syntax]
+keyword      = "#CBA6F7"
+type         = "#F9E2AF"
+string       = "#A6E3A1"
+number       = "#FAB387"
+comment      = "#6C7086"
+preprocessor = "#F5C2E7"
+current_line = "#313244"

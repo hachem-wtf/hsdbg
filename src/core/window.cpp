@@ -63,12 +63,16 @@ namespace Hsdbg
         m_framebuffer_width = static_cast<uint32_t>(framebuffer_width);
         m_framebuffer_height = static_cast<uint32_t>(framebuffer_height);
 
-        Log::info("window '{}' created at {}x{} ({}x{} framebuffer)",
+        float content_scale = 1.0f;
+        glfwGetWindowContentScale(m_handle, &content_scale, nullptr);
+
+        Log::info("window '{}' created at {}x{} ({}x{} framebuffer, {}x content scale)",
                   m_title,
                   m_width,
                   m_height,
                   m_framebuffer_width,
-                  m_framebuffer_height);
+                  m_framebuffer_height,
+                  content_scale);
     }
 
     Window::~Window()

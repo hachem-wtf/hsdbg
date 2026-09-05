@@ -47,8 +47,7 @@ namespace Hsdbg
                             if (nx < 0 || ny < 0 || nx >= width || ny >= height)
                                 continue;
 
-                            const unsigned char* near =
-                                rgba + (static_cast<std::size_t>(ny) * width + nx) * 4;
+                            const unsigned char* near = rgba + (static_cast<std::size_t>(ny) * width + nx) * 4;
 
                             if (near[3] == 0)
                                 continue;

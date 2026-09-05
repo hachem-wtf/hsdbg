@@ -1,0 +1,25 @@
+[theme]
+name = "Paper"
+
+[palette]
+text     = "#21242B"
+text_dim = "#8A909C"
+bg       = "#F4F5F7"
+bg_low   = "#E7EAEF"
+bg_high  = "#FFFFFF"
+surface  = "#E4E7ED"
+border   = "#D2D6DE"
+accent   = "#0E8FA8"
+
+[style]
+rounding      = 6
+window_border = 1
+
+[syntax]
+keyword      = "#0B5FBF"
+type         = "#0E7C86"
+string       = "#B4581E"
+number       = "#7A5AB0"
+comment      = "#5E8759"
+preprocessor = "#A03E8F"
+current_line = "#E1E8F2"

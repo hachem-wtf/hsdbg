@@ -40,9 +40,8 @@ namespace Hsdbg
 #endif
         }
 
-        // lldb spawns a helper to control the inferior on unix. windows needs none,
-        // linux ships lldb-server beside liblldb, and macos requires one entitled
-        // with com.apple.private.cs.debugger, which only the xcode copy carries
+        // lldb needs a helper to control the inferior: none on windows, lldb-server on
+        // linux, and on macos the entitled debugserver that only xcode ships
         auto debug_server_candidates() -> std::vector<std::filesystem::path>
         {
             const std::filesystem::path llvm_prefix(HSDBG_LLVM_PREFIX);
@@ -70,9 +69,7 @@ namespace Hsdbg
         {
             const std::vector<std::filesystem::path> candidates = debug_server_candidates();
 
-            // on windows the list is empty by design and this returns before the
-            // warning below; cppcheck only sees the platform it runs on, where the
-            // list is never empty
+            // windows returns above with an empty list, so this is unreachable there
             // cppcheck-suppress knownConditionTrueFalse
             if (candidates.empty())
                 return;
@@ -131,10 +128,8 @@ namespace Hsdbg
             return output;
         }
 
-        // rust ships lldb data formatters (the same ones rust-lldb sources) that
-        // teach lldb how to print String, Vec, Option, enums and friends. without
-        // them those show as raw structs, so pull them in if a toolchain is around.
-        // harmless for c/c++ targets, and a no-op if lldb has no python scripting
+        // pull in rust's lldb data formatters (String, Vec, Option, enums) if a
+        // toolchain is around; harmless for c/c++ and a no-op without python
         auto load_rust_formatters(lldb::SBDebugger& debugger) -> void
         {
             const std::string sysroot = capture_command("rustc --print sysroot 2>/dev/null");
@@ -142,8 +137,7 @@ namespace Hsdbg
             if (sysroot.empty())
                 return;
 
-            const std::filesystem::path etc =
-                std::filesystem::path(sysroot) / "lib" / "rustlib" / "etc";
+            const std::filesystem::path etc = std::filesystem::path(sysroot) / "lib" / "rustlib" / "etc";
 
             std::error_code error;
             if (!std::filesystem::exists(etc / "lldb_commands", error))
@@ -152,8 +146,7 @@ namespace Hsdbg
             lldb::SBCommandInterpreter interpreter = debugger.GetCommandInterpreter();
             lldb::SBCommandReturnObject result;
 
-            const std::string import =
-                std::format("command script import \"{}\"", (etc / "lldb_lookup.py").string());
+            const std::string import = std::format("command script import \"{}\"", (etc / "lldb_lookup.py").string());
             interpreter.HandleCommand(import.c_str(), result);
 
             if (!result.Succeeded())
@@ -163,8 +156,7 @@ namespace Hsdbg
                 return;
             }
 
-            const std::string source =
-                std::format("command source \"{}\"", (etc / "lldb_commands").string());
+            const std::string source = std::format("command source \"{}\"", (etc / "lldb_commands").string());
             interpreter.HandleCommand(source.c_str(), result);
 
             if (result.Succeeded())
@@ -1176,13 +1168,9 @@ namespace Hsdbg
         if (!frame.IsValid())
             return fail("no frame selected");
 
-        // the injected code is compiled by lldb's clang and jitted into the
-        // inferior, so any side effect it has (a = 60, *p = ...) writes real
-        // process memory and survives the resume, exactly as if the source had
-        // run it. the options here keep that from derailing the session: a fault
-        // in the snippet is unwound instead of left mid-flight, breakpoints the
-        // snippet reaches are ignored so it cannot stop inside itself, and a
-        // timeout stops a runaway call from hanging the ui
+        // lldb jits the expression into the inferior, so side effects (a = 60, *p = ...)
+        // write real process memory. the options unwind a fault, ignore breakpoints the
+        // snippet hits, and time out a runaway call
         lldb::SBExpressionOptions options;
         options.SetUnwindOnError(true);
         options.SetIgnoreBreakpoints(true);
@@ -1447,8 +1435,7 @@ namespace Hsdbg
 
             for (size_t pair = 0; pair < pairs; ++pair)
             {
-                const auto backend_id =
-                    static_cast<int32_t>(thread.GetStopReasonDataAtIndex(pair * 2));
+                const auto backend_id = static_cast<int32_t>(thread.GetStopReasonDataAtIndex(pair * 2));
 
                 const auto trace = std::ranges::find(m_traces, backend_id,
                                                      &FunctionTrace::entry_backend_id);
@@ -1709,8 +1696,7 @@ namespace Hsdbg
             const InstrOpenCall open = stack.back();
             stack.pop_back();
 
-            const double duration =
-                static_cast<double>(record.timestamp_ns - open.start_ns) / 1.0e9;
+            const double duration = static_cast<double>(record.timestamp_ns - open.start_ns) / 1.0e9;
 
             if (open.span_index < m_timeline.size())
                 m_timeline[open.span_index].duration = duration;

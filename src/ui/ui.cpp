@@ -3,6 +3,8 @@
 #include "core/log.h"
 #include "core/window.h"
 #include "debugger/debugger.h"
+#include "ui/icons.h"
+#include "ui/widgets.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -28,19 +30,21 @@ namespace Hsdbg
 {
     namespace
     {
-        constexpr const char* PANEL_SOURCE = "source";
-        constexpr const char* PANEL_BREAKPOINTS = "breakpoints";
-        constexpr const char* PANEL_CALL_STACK = "call stack";
-        constexpr const char* PANEL_THREADS = "threads";
-        constexpr const char* PANEL_SOURCE_TREE = "source tree";
-        constexpr const char* PANEL_LOCALS = "locals";
-        constexpr const char* PANEL_WATCH = "watch";
-        constexpr const char* PANEL_REGISTERS = "registers";
-        constexpr const char* PANEL_SYMBOLS = "symbols";
-        constexpr const char* PANEL_DISASSEMBLY = "disassembly";
-        constexpr const char* PANEL_CONSOLE = "console";
-        constexpr const char* PANEL_PROFILER = "profiler";
-        constexpr const char* PANEL_MACROS = "macros";
+        // Title Case label with a leading icon; the "###id" keeps the persistent
+        // dock id stable (hashes to the old lowercase name) so saved layouts match
+        constexpr const char* PANEL_SOURCE = ICON_PH_FILE_CODE "  Source###source";
+        constexpr const char* PANEL_BREAKPOINTS = ICON_PH_CIRCLE "  Breakpoints###breakpoints";
+        constexpr const char* PANEL_CALL_STACK = ICON_PH_STACK "  Call Stack###call stack";
+        constexpr const char* PANEL_THREADS = ICON_PH_BRANCH "  Threads###threads";
+        constexpr const char* PANEL_SOURCE_TREE = ICON_PH_FOLDER "  Source Tree###source tree";
+        constexpr const char* PANEL_LOCALS = ICON_PH_CUBE "  Locals###locals";
+        constexpr const char* PANEL_WATCH = ICON_PH_EYE "  Watch###watch";
+        constexpr const char* PANEL_REGISTERS = ICON_PH_CPU "  Registers###registers";
+        constexpr const char* PANEL_SYMBOLS = ICON_PH_FUNCTION "  Symbols###symbols";
+        constexpr const char* PANEL_DISASSEMBLY = ICON_PH_LIST "  Disassembly###disassembly";
+        constexpr const char* PANEL_CONSOLE = ICON_PH_TERMINAL "  Console###console";
+        constexpr const char* PANEL_PROFILER = ICON_PH_GAUGE "  Profiler###profiler";
+        constexpr const char* PANEL_MACROS = ICON_PH_BRACKETS "  Macros###macros";
 
         constexpr const char* LOAD_TARGET_POPUP = "load target";
 
@@ -64,9 +68,8 @@ namespace Hsdbg
         const ImU32 BREAKPOINT_DISABLED_COLOR = IM_COL32(120, 90, 90, 255);
         const ImU32 BREAKPOINT_HOVER_COLOR = IM_COL32(226, 84, 84, 90);
 
-        // folders read as structure, so they take a cool tint; the file that is
-        // currently open in the source view keeps its accent even when the row
-        // is not the selected one, so it stays easy to find in a long tree
+        // folders take a cool tint; the file open in the source view keeps its
+        // accent even when unselected, so it stays easy to find in a long tree
         const ImU32 SOURCE_FOLDER_COLOR = IM_COL32(150, 178, 214, 255);
         const ImU32 SOURCE_OPEN_FILE_COLOR = IM_COL32(126, 194, 126, 255);
 
@@ -326,8 +329,7 @@ namespace Hsdbg
                         break;
 
                     std::error_code error;
-                    const std::filesystem::path relative =
-                        std::filesystem::relative(file.parent_path(), prefix, error);
+                    const std::filesystem::path relative = std::filesystem::relative(file.parent_path(), prefix, error);
                     const std::string text = relative.generic_string();
 
                     if (!error && (text.empty() || text == "." || !text.starts_with("..")))
@@ -458,10 +460,10 @@ namespace Hsdbg
             ImGui::TableSetupColumn("##gutter",
                                     ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoResize,
                                     DISASSEMBLY_GUTTER_WIDTH);
-            ImGui::TableSetupColumn("address", ImGuiTableColumnFlags_WidthFixed, 120.0f);
-            ImGui::TableSetupColumn("mnemonic", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-            ImGui::TableSetupColumn("operands");
-            ImGui::TableSetupColumn("comment");
+            ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+            ImGui::TableSetupColumn("Mnemonic", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+            ImGui::TableSetupColumn("Operands");
+            ImGui::TableSetupColumn("Comment");
             ImGui::TableHeadersRow();
 
             const float row_height = ImGui::GetTextLineHeightWithSpacing();
@@ -610,9 +612,10 @@ namespace Hsdbg
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
         io.ConfigWindowsMoveFromTitleBarOnly = true;
 
-        // the scalable default font re-rasterizes at any size; the classic bitmap
-        // one only looks clean at 13px and turns to mush when the ui is scaled
-        io.Fonts->AddFontDefaultVector();
+        // the bundled ui / mono / icon faces; these re-rasterize at any size, so
+        // scaling the ui keeps the text crisp
+        load_fonts();
+        m_source_view.set_mono_font(m_font_mono);
 
         // a saved layout beats the built in one, so only build when there is none
         m_layout_built = io.IniFilename != nullptr && std::filesystem::exists(io.IniFilename);
@@ -621,7 +624,12 @@ namespace Hsdbg
         m_preferences_path = io.IniFilename != nullptr
                                  ? std::filesystem::path(io.IniFilename).parent_path() / "hsdbg.ini"
                                  : std::filesystem::path("hsdbg.ini");
+
+        // on a first run nothing is saved, so let the theme seed accent / rounding /
+        // syntax; after that the saved values win, keeping the user's tweaks
+        const bool had_preferences = std::filesystem::exists(m_preferences_path);
         m_preferences = load_preferences(m_preferences_path);
+        load_selected_theme(!had_preferences);
 
         apply_style();
 
@@ -769,17 +777,24 @@ namespace Hsdbg
         ImGui::SetNextWindowSize(viewport->WorkSize);
         ImGui::SetNextWindowViewport(viewport->ID);
 
-        constexpr ImGuiWindowFlags root_flags =
-            ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar |
-            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+        constexpr ImGuiWindowFlags root_flags = ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking |
+                                                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                                                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                                ImGuiWindowFlags_NoBringToFrontOnFocus |
+                                                ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoScrollbar |
+                                                ImGuiWindowFlags_NoScrollWithMouse;
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ROOT_PADDING);
 
+        // the ground between panels is the theme's deepest level, so the panels
+        // read as separated tiles once the docking separators widen into gaps
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, m_theme.bg_low);
+
         ImGui::Begin("##hsdbg_root", nullptr, root_flags);
 
+        ImGui::PopStyleColor();
         ImGui::PopStyleVar(3);
 
         draw_menu_bar(debugger);
@@ -792,9 +807,12 @@ namespace Hsdbg
         const float status_bar_height = ImGui::GetTextLineHeight() +
                                         ImGui::GetStyle().ItemSpacing.y * 3.0f;
 
+        // NoWindowMenuButton drops the little ▼ docking/collapse menu that imgui
+        // otherwise stamps into the corner of every panel's tab bar
         ImGui::DockSpace(dockspace_id,
                          ImVec2(0.0f, ImGui::GetContentRegionAvail().y - status_bar_height),
-                         ImGuiDockNodeFlags_PassthruCentralNode);
+                         ImGuiDockNodeFlags_PassthruCentralNode |
+                             static_cast<int>(ImGuiDockNodeFlags_NoWindowMenuButton));
 
         if (!m_layout_built)
         {
@@ -824,10 +842,8 @@ namespace Hsdbg
         if (std::optional<std::string> request = m_source_view.take_watch_request())
             add_watch(debugger, std::move(*request));
 
-        // let the profiling views appear on their own the moment work starts:
-        // the profiler (which now holds the flame chart, timings and graphs) when
-        // something is being sampled, traced or instrumented. the latch means it
-        // only springs up on the rising edge, so closing it makes it stay closed
+        // reveal the profiler on the rising edge of any profiling activity, but let
+        // the user close it again (the latch only fires once)
         const bool profiling_active = debugger.sampling_enabled() ||
                                       debugger.instrumentation_active() ||
                                       !debugger.traces().empty();
@@ -849,16 +865,12 @@ namespace Hsdbg
         draw_profiler_panel(debugger);
         draw_macros_panel(debugger);
 
-        if (m_visible.demo)
-            ImGui::ShowDemoWindow(&m_visible.demo);
-
         draw_preferences_window();
         draw_command_palette(debugger);
 
-        // a window claims its tab when it is first submitted, so this can only be
-        // asked for once every panel in the node exists. within each tabbed node
-        // the later focus wins, so raise the tab we want in front last; the very
-        // last call also lands the keyboard focus, which belongs on the source
+        // a window claims its tab only once submitted, so raise tabs after every
+        // panel exists; the later focus wins, and the last call takes keyboard
+        // focus — which belongs on the source
         if (m_select_default_tabs)
         {
             ImGui::SetWindowFocus(PANEL_SYMBOLS);
@@ -910,13 +922,9 @@ namespace Hsdbg
         ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
         ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->WorkSize);
 
-        // four regions frame a central code view, each holding one stage of the
-        // debugging loop so related panels sit together instead of scattered:
-        //   left   navigator - where to go (files, symbols) over where execution
-        //                      currently is (call stack, threads)
-        //   center code      - source and disassembly, both tracking the pc
-        //   right  inspector - the selected frame's state: locals over registers
-        //   bottom output    - the console and the auxiliary read-outs
+        // four regions frame the central code view, each a stage of the loop: left
+        // navigator (files/symbols, call stack/threads), center code (source +
+        // disassembly), right inspector (locals/registers), bottom output
         ImGuiID center_id = dockspace_id;
         const ImGuiID left_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Left, 0.20f, nullptr, &center_id);
         const ImGuiID right_id = ImGui::DockBuilderSplitNode(center_id, ImGuiDir_Right, 0.24f, nullptr, &center_id);
@@ -958,70 +966,76 @@ namespace Hsdbg
         if (!ImGui::BeginMenuBar())
             return;
 
-        if (ImGui::BeginMenu("file"))
+        // brand wordmark in the bold face
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushFont(m_font_strong, 0.0f);
+        ImGui::TextUnformatted("hsdbg");
+        ImGui::PopFont();
+        ImGui::SameLine(0.0f, 18.0f);
+
+        if (ImGui::BeginMenu("File"))
         {
             // a menu is its own popup, so the request has to be handed back to the
             // root window or BeginPopupModal never sees a matching id
-            if (ImGui::MenuItem("load target..."))
+            if (ImGui::MenuItem("Load Target…"))
             {
                 m_target_input = debugger.target_path().string();
                 m_load_target_pending = true;
             }
 
-            if (ImGui::MenuItem("unload target", nullptr, false, debugger.has_target()))
+            if (ImGui::MenuItem("Unload Target", nullptr, false, debugger.has_target()))
                 debugger.unload_target();
 
             ImGui::Separator();
 
-            if (ImGui::MenuItem("command palette...", "cmd+k"))
+            if (ImGui::MenuItem("Command Palette…", "Cmd+K"))
                 m_palette_request = true;
 
-            ImGui::MenuItem("preferences...", nullptr, &m_show_preferences);
+            ImGui::MenuItem("Preferences…", nullptr, &m_show_preferences);
 
             ImGui::Separator();
 
-            if (ImGui::MenuItem("quit", "cmd+q"))
+            if (ImGui::MenuItem("Quit", "Cmd+Q"))
                 m_window->set_should_close(true);
 
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("run"))
+        if (ImGui::BeginMenu("Run"))
         {
             const bool has_target = debugger.has_target();
 
-            if (ImGui::MenuItem("continue", "f5", false, has_target))
+            if (ImGui::MenuItem("Continue", "F5", false, has_target))
                 report(debugger.resume(), "continue");
 
-            if (ImGui::MenuItem("pause", nullptr, false, debugger.is_running()))
+            if (ImGui::MenuItem("Pause", nullptr, false, debugger.is_running()))
                 report(debugger.pause(), "pause");
 
-            if (ImGui::MenuItem("stop", nullptr, false, has_target))
+            if (ImGui::MenuItem("Stop", nullptr, false, has_target))
                 report(debugger.terminate(), "stop");
 
             ImGui::Separator();
 
-            const StepMode step_mode =
-                m_preferences.step_by_instruction ? StepMode::Instruction : StepMode::Line;
+            const StepMode step_mode = m_preferences.step_by_instruction ? StepMode::Instruction : StepMode::Line;
 
-            if (ImGui::MenuItem("step over", "f10", false, has_target))
-                report(debugger.step_over(step_mode), "step over");
+            if (ImGui::MenuItem("Step Over", "F10", false, has_target))
+                report(debugger.step_over(step_mode), "Step Over");
 
-            if (ImGui::MenuItem("step into", "f11", false, has_target))
-                report(debugger.step_into(step_mode), "step into");
+            if (ImGui::MenuItem("Step Into", "F11", false, has_target))
+                report(debugger.step_into(step_mode), "Step Into");
 
-            if (ImGui::MenuItem("step out", "shift+f11", false, has_target))
-                report(debugger.step_out(), "step out");
+            if (ImGui::MenuItem("Step Out", "Shift+F11", false, has_target))
+                report(debugger.step_out(), "Step Out");
 
             ImGui::Separator();
 
-            if (ImGui::MenuItem("clear breakpoints", nullptr, false, !debugger.breakpoints().empty()))
+            if (ImGui::MenuItem("Clear Breakpoints", nullptr, false, !debugger.breakpoints().empty()))
                 debugger.clear_breakpoints();
 
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("view"))
+        if (ImGui::BeginMenu("View"))
         {
             ImGui::MenuItem(PANEL_SOURCE, nullptr, &m_visible.source);
             ImGui::MenuItem(PANEL_SOURCE_TREE, nullptr, &m_visible.source_tree);
@@ -1039,13 +1053,24 @@ namespace Hsdbg
 
             ImGui::Separator();
 
-            if (ImGui::MenuItem("reset layout"))
+            if (ImGui::MenuItem("Reset Layout"))
                 m_layout_built = false;
-
-            ImGui::MenuItem("imgui demo", nullptr, &m_visible.demo);
 
             ImGui::EndMenu();
         }
+
+        // a right-aligned command-palette affordance, echoing the ⌘K shortcut
+        const char* palette_hint = ICON_PH_SEARCH "  Run a command     Cmd+K";
+        const float hint_w = ImGui::CalcTextSize(palette_hint).x;
+        ImGui::SameLine(ImGui::GetWindowWidth() - hint_w - 14.0f);
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetColorU32(ImGuiCol_TextDisabled));
+        ImGui::TextUnformatted(palette_hint);
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemClicked())
+            m_palette_request = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 
         ImGui::EndMenuBar();
     }
@@ -1061,24 +1086,28 @@ namespace Hsdbg
             m_mascot.load(std::filesystem::path(HSDBG_ASSET_DIR) / "peepocry.gif");
         }
 
-        const float button_height = ImGui::GetFrameHeight();
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 9.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, TOOLBAR_PADDING);
+
+        // the square size for the rounded icon buttons that make up the transport
+        const float control = ImGui::GetFrameHeight();
         const bool has_mascot = m_preferences.show_mascot && m_mascot.valid() &&
                                 m_mascot.height() > 0.0f;
-        const float mascot_height = has_mascot ? button_height * m_preferences.mascot_scale : 0.0f;
-        const float row_height = std::max(button_height, mascot_height);
+        const float mascot_height = has_mascot ? control * m_preferences.mascot_scale : 0.0f;
+        const float row_height = std::max(control, mascot_height);
 
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 6.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, TOOLBAR_PADDING);
         ImGui::BeginChild("##toolbar", ImVec2(0.0f, row_height + TOOLBAR_PADDING.y * 2.0f));
 
         const float row_top = ImGui::GetCursorPosY();
-        ImGui::SetCursorPosY(row_top + (row_height - button_height) * 0.5f);
+        ImGui::SetCursorPosY(row_top + (row_height - control) * 0.5f);
 
-        const StepMode step_mode =
-            m_preferences.step_by_instruction ? StepMode::Instruction : StepMode::Line;
+        const StepMode step_mode = m_preferences.step_by_instruction ? StepMode::Instruction : StepMode::Line;
 
-        ImGui::BeginDisabled(!has_target || running);
-        if (ImGui::Button("run"))
+        // a spacer between logical groups of transport controls
+        const auto gap = [] { ImGui::SameLine(0.0f, 14.0f); };
+
+        if (Widgets::icon_button("run", ICON_PH_PLAY, has_target && !running, "Run",
+                                 !has_target || running, control))
         {
             LaunchSpec spec;
             spec.executable = debugger.target_path();
@@ -1086,53 +1115,35 @@ namespace Hsdbg
 
             report(debugger.launch(spec), "run");
         }
-        ImGui::EndDisabled();
 
         ImGui::SameLine();
-
-        ImGui::BeginDisabled(!running);
-        if (ImGui::Button("pause"))
+        if (Widgets::icon_button("pause", ICON_PH_PAUSE, false, "Pause", !running, control))
             report(debugger.pause(), "pause");
-        ImGui::EndDisabled();
 
         ImGui::SameLine();
-
-        ImGui::BeginDisabled(!has_target);
-        if (ImGui::Button("stop"))
+        if (Widgets::icon_button("stop", ICON_PH_STOP, false, "Stop", !has_target, control))
             report(debugger.terminate(), "stop");
 
-        ImGui::SameLine();
-        ImGui::TextDisabled("|");
-        ImGui::SameLine();
-
-        if (ImGui::Button("step over"))
-            report(debugger.step_over(step_mode), "step over");
+        gap();
+        if (Widgets::icon_button("step_over", ICON_PH_STEP_OVER, false, "Step Over",
+                                 !has_target, control))
+            report(debugger.step_over(step_mode), "Step Over");
 
         ImGui::SameLine();
-
-        if (ImGui::Button("step into"))
-            report(debugger.step_into(step_mode), "step into");
-
-        ImGui::SameLine();
-
-        if (ImGui::Button("step out"))
-            report(debugger.step_out(), "step out");
-        ImGui::EndDisabled();
+        if (Widgets::icon_button("step_into", ICON_PH_STEP_INTO, false, "Step Into",
+                                 !has_target, control))
+            report(debugger.step_into(step_mode), "Step Into");
 
         ImGui::SameLine();
-        ImGui::TextDisabled("|");
-        ImGui::SameLine();
+        if (Widgets::icon_button("step_out", ICON_PH_STEP_OUT, false, "Step Out",
+                                 !has_target, control))
+            report(debugger.step_out(), "Step Out");
 
-        // the way in to profiling, and the way back out: the panel only exists
-        // while this is on, and lights up to show that it is. the button toggles
-        // that state, so the tint is keyed off a copy taken before the click or
-        // the push and pop would not balance
-        const bool profiler_open = m_visible.profiler;
-
-        if (profiler_open)
-            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-
-        if (ImGui::Button("profiler"))
+        // the way in to profiling and back out: the panel only exists while this
+        // is on, and the accent fill shows that it is
+        gap();
+        if (Widgets::icon_button("profiler", ICON_PH_GAUGE, m_visible.profiler, "Profiler",
+                                 false, control))
         {
             m_visible.profiler = !m_visible.profiler;
 
@@ -1140,15 +1151,9 @@ namespace Hsdbg
                 m_focus_profiler = true;
         }
 
-        if (profiler_open)
-            ImGui::PopStyleColor();
-
-        ImGui::SameLine();
-        ImGui::TextDisabled("|");
-        ImGui::SameLine();
-
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(state_color(debugger.state()), "%s", to_string(debugger.state()).data());
+        gap();
+        Widgets::chip(std::string(to_string(debugger.state())).c_str(),
+                      ImGui::ColorConvertFloat4ToU32(state_color(debugger.state())));
 
         if (has_mascot)
         {
@@ -1163,7 +1168,7 @@ namespace Hsdbg
             ImGui::Dummy(size);
 
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("it's going to be okay");
+                ImGui::SetTooltip("It's going to be okay");
 
             const ImVec2 viewport = ImGui::GetMainViewport()->Pos;
             m_mascot_pending = true;
@@ -1192,7 +1197,7 @@ namespace Hsdbg
         if (debugger.has_target())
             ImGui::Text("%s", debugger.target_path().filename().string().c_str());
         else
-            ImGui::TextDisabled("no target");
+            ImGui::TextDisabled("No target");
 
         ImGui::SameLine();
         ImGui::TextDisabled("|");
@@ -1228,7 +1233,7 @@ namespace Hsdbg
         if (!ImGui::BeginPopupModal(LOAD_TARGET_POPUP, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
             return;
 
-        ImGui::TextDisabled("path to an executable to debug");
+        ImGui::TextDisabled("Path to an executable to debug");
 
         ImGui::SetNextItemWidth(420.0f);
 
@@ -1236,7 +1241,7 @@ namespace Hsdbg
                                                 &m_target_input,
                                                 ImGuiInputTextFlags_EnterReturnsTrue);
 
-        if (ImGui::Button("load") || submitted)
+        if (ImGui::Button("Load") || submitted)
         {
             if (const auto result = debugger.load_target(m_target_input); result)
             {
@@ -1251,7 +1256,7 @@ namespace Hsdbg
 
         ImGui::SameLine();
 
-        if (ImGui::Button("cancel"))
+        if (ImGui::Button("Cancel"))
             ImGui::CloseCurrentPopup();
 
         ImGui::EndPopup();
@@ -1262,6 +1267,16 @@ namespace Hsdbg
         // FontScaleMain re-rasterizes the vector font crisply, unlike the legacy
         // FontGlobalScale which just stretched the baked atlas
         ImGui::GetStyle().FontScaleMain = m_preferences.ui_scale;
+
+        // one-shot: report the framebuffer scale (on macos this, not content scale,
+        // carries retina density) so font crispness can be reasoned about
+        static bool logged_scale = false;
+        if (!logged_scale)
+        {
+            logged_scale = true;
+            const ImVec2 fb = ImGui::GetIO().DisplayFramebufferScale;
+            Log::info("display: framebuffer scale {}x{}", fb.x, fb.y);
+        }
 
         m_source_view.set_highlighting(m_preferences.syntax_highlighting);
         m_source_view.set_line_numbers(m_preferences.show_line_numbers);
@@ -1290,7 +1305,16 @@ namespace Hsdbg
     auto Ui::draw_preferences_window() -> void
     {
         if (!m_show_preferences)
+        {
+            m_prefs_open_prev = false;
             return;
+        }
+
+        // rescan the themes folder when the window opens, so a .toml dropped in
+        // while the app is running shows up without a restart
+        if (!m_prefs_open_prev)
+            m_themes = list_themes(themes_directory());
+        m_prefs_open_prev = true;
 
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
         const ImVec2 center(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
@@ -1300,23 +1324,27 @@ namespace Hsdbg
         ImGui::SetNextWindowSize(ImVec2(560.0f, 380.0f), ImGuiCond_Appearing);
         ImGui::SetNextWindowSizeConstraints(ImVec2(460.0f, 300.0f), ImVec2(FLT_MAX, FLT_MAX));
 
-        if (!ImGui::Begin("preferences", &m_show_preferences, ImGuiWindowFlags_NoDocking))
+        if (!ImGui::Begin("Preferences###preferences", &m_show_preferences, ImGuiWindowFlags_NoDocking))
         {
             ImGui::End();
             return;
         }
 
-        static constexpr const char* CATEGORIES[] = { "appearance", "editor", "debugger" };
+        static constexpr const char* CATEGORIES[] = { "Appearance", "Editor", "Debugger" };
+        static constexpr const char* CATEGORY_ICONS[] = {
+            ICON_PH_SLIDERS, ICON_PH_FILE_CODE, ICON_PH_BUG
+        };
         bool changed = false;
         bool restyle = false;
 
         const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
 
         // left: the category list; right: that category's settings
-        ImGui::BeginChild("##pref_categories", ImVec2(150.0f, -footer), ImGuiChildFlags_Borders);
+        ImGui::BeginChild("##pref_categories", ImVec2(158.0f, -footer), ImGuiChildFlags_Borders);
         for (int index = 0; index < IM_ARRAYSIZE(CATEGORIES); ++index)
         {
-            if (ImGui::Selectable(CATEGORIES[index], m_preferences_tab == index))
+            const std::string label = std::string(CATEGORY_ICONS[index]) + "  " + CATEGORIES[index];
+            if (Widgets::selectable_row(label.c_str(), m_preferences_tab == index))
                 m_preferences_tab = index;
         }
         ImGui::EndChild();
@@ -1344,68 +1372,138 @@ namespace Hsdbg
                 changed = true;
         };
 
+        // a settings row: the label on the left, an ios-style switch pinned to the
+        // right edge and vertically centred against the text
+        const auto toggle_row = [&](const char* label, bool* value, const char* help_text = nullptr) {
+            const float toggle_h = ImGui::GetFrameHeight() * 0.78f;
+            const float toggle_w = toggle_h * 1.8f;
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(label);
+            if (help_text != nullptr)
+                help(help_text);
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - toggle_w);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (ImGui::GetFrameHeight() - toggle_h) * 0.5f);
+            if (Widgets::toggle(label, value))
+                changed = true;
+        };
+
         if (m_preferences_tab == 0)
         {
-            ImGui::SeparatorText("interface");
-            changed |= ImGui::SliderFloat("ui scale", &m_preferences.ui_scale, 0.75f, 2.0f, "%.2fx");
-            help("scales every font. the text stays crisp because it is re-rasterized, not stretched.");
+            Widgets::section_header("theme");
 
-            if (ImGui::ColorEdit3("accent colour", m_preferences.accent,
+            // preview swatches for the loaded theme, so the accent/rounding
+            // pickers below read as tweaks on top of a named starting point
+            const auto swatch = [](ImVec4 colour) {
+                ImGui::ColorButton("##sw", colour,
+                                   ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                                   ImVec2(14.0f, 14.0f));
+                ImGui::SameLine(0.0f, 4.0f);
+            };
+            swatch(m_theme.bg);
+            swatch(m_theme.bg_high);
+            swatch(m_theme.surface);
+            swatch(m_theme.text);
+            swatch(ImVec4(m_preferences.accent[0], m_preferences.accent[1],
+                          m_preferences.accent[2], 1.0f));
+            ImGui::NewLine();
+
+            const char* current = m_preferences.theme.c_str();
+            for (const auto& entry : m_themes)
+            {
+                if (entry.id == m_preferences.theme)
+                {
+                    current = entry.name.c_str();
+                    break;
+                }
+            }
+
+            if (ImGui::BeginCombo("Theme", current))
+            {
+                for (const auto& entry : m_themes)
+                {
+                    const bool selected = entry.id == m_preferences.theme;
+                    if (ImGui::Selectable(entry.name.c_str(), selected))
+                        select_theme(entry); // seeds the tweaks below and saves
+                    if (selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            help("Themes live in assets/themes as .toml files. drop a new one in, reopen this "
+                 "window, and it appears here. picking one resets the tweaks below to its values.");
+
+            Widgets::section_header("interface");
+            changed |= Widgets::slider_float("UI scale", &m_preferences.ui_scale, 0.75f, 2.0f, "%.2fx");
+            help("Scales every font. the text stays crisp because it is re-rasterized, not stretched.");
+
+            if (ImGui::ColorEdit3("Accent colour", m_preferences.accent,
                                   ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoAlpha))
             {
                 changed = true;
                 restyle = true;
             }
 
-            if (ImGui::SliderFloat("corner rounding", &m_preferences.rounding, 0.0f, 12.0f, "%.0f px"))
+            if (Widgets::slider_float("Corner rounding", &m_preferences.rounding, 0.0f, 12.0f, "%.0f px"))
             {
                 changed = true;
                 restyle = true;
             }
 
-            changed |= ImGui::Checkbox("show fps in the status bar", &m_preferences.show_fps);
+            toggle_row("Show FPS in the status bar", &m_preferences.show_fps);
 
-            ImGui::SeparatorText("layout");
-            if (ImGui::Button("reset window layout"))
+            Widgets::section_header("layout");
+            if (ImGui::Button("Reset window layout"))
                 m_layout_built = false;
-            help("restores the default arrangement of all the docked panels.");
+            help("Restores the default arrangement of all the docked panels.");
 
-            ImGui::SeparatorText("mascot");
-            changed |= ImGui::Checkbox("show the crying pepe", &m_preferences.show_mascot);
+            Widgets::section_header("mascot");
+            toggle_row("Show the crying pepe", &m_preferences.show_mascot);
 
             ImGui::BeginDisabled(!m_preferences.show_mascot);
-            changed |= ImGui::SliderFloat("pepe size", &m_preferences.mascot_scale, 1.0f, 3.0f, "%.1fx");
+            changed |= Widgets::slider_float("Pepe size", &m_preferences.mascot_scale, 1.0f, 3.0f, "%.1fx");
             ImGui::EndDisabled();
         }
         else if (m_preferences_tab == 1)
         {
-            ImGui::SeparatorText("source view");
-            changed |= ImGui::Checkbox("syntax highlighting", &m_preferences.syntax_highlighting);
-            changed |= ImGui::Checkbox("show line numbers", &m_preferences.show_line_numbers);
-            changed |= ImGui::Checkbox("highlight the current line",
-                                       &m_preferences.highlight_current_line);
+            Widgets::section_header("source view");
+            toggle_row("Syntax highlighting", &m_preferences.syntax_highlighting);
+            toggle_row("Show line numbers", &m_preferences.show_line_numbers);
+            toggle_row("Highlight the current line", &m_preferences.highlight_current_line);
 
-            ImGui::SeparatorText("colours");
+            Widgets::section_header("colours");
             ImGui::BeginDisabled(!m_preferences.syntax_highlighting);
-            accent_swatch("keyword", m_preferences.color_keyword);
-            accent_swatch("type", m_preferences.color_type);
-            accent_swatch("string", m_preferences.color_string);
-            accent_swatch("number", m_preferences.color_number);
-            accent_swatch("comment", m_preferences.color_comment);
-            accent_swatch("preprocessor", m_preferences.color_preprocessor);
+            accent_swatch("Keyword", m_preferences.color_keyword);
+            accent_swatch("Type", m_preferences.color_type);
+            accent_swatch("String", m_preferences.color_string);
+            accent_swatch("Number", m_preferences.color_number);
+            accent_swatch("Comment", m_preferences.color_comment);
+            accent_swatch("Preprocessor", m_preferences.color_preprocessor);
             ImGui::EndDisabled();
-            accent_swatch("current line", m_preferences.color_current_line);
+            accent_swatch("Current line", m_preferences.color_current_line);
         }
         else if (m_preferences_tab == 2)
         {
-            ImGui::SeparatorText("launching");
-            changed |= ImGui::Checkbox("break at entry point on launch", &m_preferences.stop_at_entry);
-            help("stop on the very first instruction instead of running to your breakpoints.");
+            Widgets::section_header("launching");
+            toggle_row("Break at entry point on launch", &m_preferences.stop_at_entry,
+                       "stop on the very first instruction instead of running to your breakpoints.");
 
-            ImGui::SeparatorText("stepping");
-            changed |= ImGui::Checkbox("step by instruction, not line",
-                                       &m_preferences.step_by_instruction);
-            help("the step over/into buttons advance one machine instruction at a time.");
+            Widgets::section_header("stepping");
+            {
+                static const char* const step_modes[] = { "Line", "Instruction" };
+                const int current_mode = m_preferences.step_by_instruction ? 1 : 0;
+                const int next_mode = Widgets::segmented("##step_mode", step_modes, 2, current_mode);
+                ImGui::SameLine();
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Step granularity");
+                help("The step over/into buttons advance a whole source line, or a single "
+                     "machine instruction.");
+                if (next_mode != current_mode)
+                {
+                    m_preferences.step_by_instruction = (next_mode == 1);
+                    changed = true;
+                }
+            }
         }
 
         ImGui::PopItemWidth();
@@ -1413,15 +1511,18 @@ namespace Hsdbg
 
         ImGui::Separator();
 
-        if (ImGui::Button("reset to defaults"))
+        if (ImGui::Button("Reset to defaults"))
         {
             m_preferences = Preferences{};
+            // realign the neutral palette with the default theme so the reset
+            // accent does not sit on top of the previously loaded theme's levels
+            load_selected_theme(false);
             changed = true;
             restyle = true;
         }
 
         ImGui::SameLine();
-        ImGui::TextDisabled("saved to %s", m_preferences_path.filename().string().c_str());
+        ImGui::TextDisabled("Saved to %s", m_preferences_path.filename().string().c_str());
 
         // persist the moment anything changes, so nothing is lost to a crash
         if (changed)
@@ -1453,7 +1554,7 @@ namespace Hsdbg
         {
             if (debugger.breakpoints().empty())
             {
-                ImGui::TextDisabled("no breakpoints, click a gutter in source or disassembly");
+                Widgets::empty_state(ICON_PH_CIRCLE, "No breakpoints yet");
             }
             else
             {
@@ -1462,17 +1563,18 @@ namespace Hsdbg
 
                 if (ImGui::BeginTable("##breakpoints", 8, flags))
                 {
-                    ImGui::TableSetupColumn("on", ImGuiTableColumnFlags_WidthFixed, 26.0f);
-                    ImGui::TableSetupColumn("id", ImGuiTableColumnFlags_WidthFixed, 30.0f);
-                    ImGui::TableSetupColumn("location");
-                    ImGui::TableSetupColumn("address");
-                    ImGui::TableSetupColumn("condition");
-                    ImGui::TableSetupColumn("skip", ImGuiTableColumnFlags_WidthFixed, 50.0f);
-                    ImGui::TableSetupColumn("hits", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+                    ImGui::TableSetupColumn("On", ImGuiTableColumnFlags_WidthFixed, 26.0f);
+                    ImGui::TableSetupColumn("Id", ImGuiTableColumnFlags_WidthFixed, 30.0f);
+                    ImGui::TableSetupColumn("Location");
+                    ImGui::TableSetupColumn("Address");
+                    ImGui::TableSetupColumn("Condition");
+                    ImGui::TableSetupColumn("Skip", ImGuiTableColumnFlags_WidthFixed, 50.0f);
+                    ImGui::TableSetupColumn("Hits", ImGuiTableColumnFlags_WidthFixed, 40.0f);
                     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 26.0f);
                     ImGui::TableSetupScrollFreeze(0, 1);
                     ImGui::TableHeadersRow();
 
+                    ImGui::PushFont(m_font_mono, 0.0f);
                     uint32_t pending_removal = 0;
 
                     for (const Breakpoint& breakpoint : debugger.breakpoints())
@@ -1496,11 +1598,9 @@ namespace Hsdbg
                         }
                         else if (breakpoint.line != 0)
                         {
-                            // clicking the location takes the source view there, so
-                            // the breakpoints list doubles as a jump list. plain
-                            // text with a click test, not a Selectable: a full-width
-                            // Selectable in this stretch-sized column feeds its own
-                            // width back into the column solver and lands on NaN
+                            // clicking jumps the source view here. plain text + a click
+                            // test, not a Selectable — a full-width one in this stretch
+                            // column feeds its width to the solver and lands on NaN
                             const std::string location = std::format(
                                 "{}:{}", breakpoint.file.filename().string(), breakpoint.line);
 
@@ -1534,7 +1634,7 @@ namespace Hsdbg
                         }
                         else
                         {
-                            ImGui::TextDisabled("pending");
+                            ImGui::TextDisabled("Pending");
                         }
 
                         // imgui keeps its own buffer while an input is focused, so
@@ -1544,7 +1644,7 @@ namespace Hsdbg
                         ImGui::SetNextItemWidth(-1.0f);
 
                         if (ImGui::InputTextWithHint("##condition",
-                                                     "stop when",
+                                                     "Stop when…",
                                                      &condition,
                                                      ImGuiInputTextFlags_EnterReturnsTrue))
                         {
@@ -1566,12 +1666,13 @@ namespace Hsdbg
                         ImGui::Text("%u", breakpoint.hit_count);
 
                         ImGui::TableNextColumn();
-                        if (ImGui::SmallButton("x"))
+                        if (Widgets::remove_button("##remove"))
                             pending_removal = breakpoint.id;
 
                         ImGui::PopID();
                     }
 
+                    ImGui::PopFont();
                     ImGui::EndTable();
 
                     if (pending_removal != 0)
@@ -1592,7 +1693,7 @@ namespace Hsdbg
         {
             if (debugger.call_stack().empty())
             {
-                ImGui::TextDisabled("no call stack");
+                Widgets::empty_state(ICON_PH_STACK, "No call stack");
             }
             else
             {
@@ -1601,7 +1702,7 @@ namespace Hsdbg
                     const bool selected = frame.index == debugger.selected_frame();
                     const std::string label = std::format("{:>2}  {}", frame.index, frame.function);
 
-                    if (ImGui::Selectable(label.c_str(), selected))
+                    if (Widgets::selectable_row(label.c_str(), selected))
                     {
                         debugger.select_frame(frame.index);
                         show_frame(frame);
@@ -1614,7 +1715,9 @@ namespace Hsdbg
                         continue;
 
                     ImGui::SameLine();
+                    ImGui::PushFont(m_font_mono, 0.0f);
                     ImGui::TextDisabled("%s:%u", frame.file.filename().string().c_str(), frame.line);
+                    ImGui::PopFont();
                 }
             }
         }
@@ -1631,7 +1734,7 @@ namespace Hsdbg
         {
             if (debugger.threads().empty())
             {
-                ImGui::TextDisabled("no threads");
+                Widgets::empty_state(ICON_PH_BRANCH, "No threads");
             }
             else
             {
@@ -1640,7 +1743,7 @@ namespace Hsdbg
                     const bool selected = thread.id == debugger.selected_thread();
                     const std::string label = std::format("{}  {}", thread.id, thread.name);
 
-                    if (ImGui::Selectable(label.c_str(), selected))
+                    if (Widgets::selectable_row(label.c_str(), selected))
                     {
                         debugger.select_thread(thread.id);
 
@@ -1671,19 +1774,18 @@ namespace Hsdbg
 
             if (files.empty())
             {
-                ImGui::TextDisabled("no source files");
+                Widgets::empty_state(ICON_PH_FOLDER, "No source files");
             }
             else
             {
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::InputTextWithHint("##source_filter", "filter files", &m_source_filter);
+                ImGui::InputTextWithHint("##source_filter", "Filter files", &m_source_filter);
 
                 const SourceNode tree = build_source_tree(files);
                 const std::filesystem::path& open = m_source_view.path();
 
-                // folders stay collapsed until they are needed. when the open file
-                // changes, the one frame where it differs from what we last showed
-                // expands the chain down to it; after that the user is in control
+                // folders stay collapsed until needed; when the open file changes,
+                // the chain to it expands once, then the user is in control
                 const bool reveal = open != m_revealed_source;
 
                 ImDrawList* const draw_list = ImGui::GetWindowDrawList();
@@ -1700,7 +1802,8 @@ namespace Hsdbg
                         if (selected)
                             ImGui::PushStyleColor(ImGuiCol_Text, SOURCE_OPEN_FILE_COLOR);
 
-                        const bool clicked = ImGui::Selectable(node.name.c_str(), selected);
+                        const bool clicked = Widgets::selectable_row(
+                            (std::string(ICON_PH_FILE "  ") + node.name).c_str(), selected);
 
                         if (selected)
                             ImGui::PopStyleColor();
@@ -1721,26 +1824,23 @@ namespace Hsdbg
                                                          ImGuiTreeNodeFlags_OpenOnArrow |
                                                          ImGuiTreeNodeFlags_OpenOnDoubleClick;
 
-                    // a filter opens every folder so its matches are visible; with
-                    // no filter, only the chain down to the open file unfurls, and
-                    // only on the frame it changed so manual collapses survive
+                    // a filter opens every folder; with none, only the chain to the
+                    // open file unfurls, and only on the frame it changed
                     if (!m_source_filter.empty())
                         ImGui::SetNextItemOpen(true, ImGuiCond_Always);
                     else if (reveal && node_contains(node, open))
                         ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 
                     ImGui::PushStyleColor(ImGuiCol_Text, SOURCE_FOLDER_COLOR);
-                    const bool open_node = ImGui::TreeNodeEx(node.name.c_str(), flags);
+                    const bool open_node = ImGui::TreeNodeEx(
+                        (std::string(ICON_PH_FOLDER "  ") + node.name).c_str(), flags);
                     ImGui::PopStyleColor();
 
                     if (!open_node)
                         return;
 
-                    // connect this folder to each visible child the way `tree`
-                    // does: a vertical spine down the gutter with a horizontal
-                    // tick out to every child, the spine ending at the last one.
-                    // the glyphs would be tofu in the default font, so the lines
-                    // are drawn by hand
+                    // draw the folder→child spine by hand (a vertical line down the
+                    // gutter with a tick to each child); the glyphs would be tofu
                     const float indent = ImGui::GetStyle().IndentSpacing;
                     const float half_row = ImGui::GetTextLineHeight() * 0.5f;
                     const float spine_x = ImGui::GetCursorScreenPos().x - indent * 0.5f;
@@ -1770,7 +1870,7 @@ namespace Hsdbg
                 };
 
                 if (tree.children.empty())
-                    ImGui::TextDisabled("no source files");
+                    Widgets::empty_state(ICON_PH_FOLDER, "No source files");
                 else
                     draw_node(tree);
 
@@ -1790,7 +1890,7 @@ namespace Hsdbg
         {
             if (debugger.locals().empty())
             {
-                ImGui::TextDisabled("no locals");
+                Widgets::empty_state(ICON_PH_CUBE, "No locals");
             }
             else
             {
@@ -1799,14 +1899,16 @@ namespace Hsdbg
 
                 if (ImGui::BeginTable("##locals", 3, flags))
                 {
-                    ImGui::TableSetupColumn("name");
-                    ImGui::TableSetupColumn("type");
-                    ImGui::TableSetupColumn("value");
+                    ImGui::TableSetupColumn("Name");
+                    ImGui::TableSetupColumn("Type");
+                    ImGui::TableSetupColumn("Value");
                     ImGui::TableSetupScrollFreeze(0, 1);
                     ImGui::TableHeadersRow();
 
+                    ImGui::PushFont(m_font_mono, 0.0f);
                     for (const Variable& variable : debugger.locals())
                         draw_variable(variable);
+                    ImGui::PopFont();
 
                     ImGui::EndTable();
                 }
@@ -1855,9 +1957,8 @@ namespace Hsdbg
 
         if (ImGui::Begin(PANEL_WATCH, &m_visible.watch))
         {
-            // re-run the expressions whenever the target stops again or the frame
-            // the ui is looking at moves, but never every frame: each call jits and
-            // runs code in the target
+            // re-run the watches on each stop or frame change, never every frame:
+            // each evaluation jits and runs code in the target
             const bool stopped = debugger.is_stopped();
             const bool moved = debugger.stop_count() != m_watch_stop ||
                                debugger.selected_thread() != m_watch_thread ||
@@ -1889,12 +1990,12 @@ namespace Hsdbg
                 m_watch_evaluated = false;
 
             ImGui::SetNextItemWidth(-60.0f);
-            const bool submitted = ImGui::InputTextWithHint("##watch_input", "expression to watch",
+            const bool submitted = ImGui::InputTextWithHint("##watch_input", "Expression to watch",
                                                             &m_watch_input,
                                                             ImGuiInputTextFlags_EnterReturnsTrue);
 
             ImGui::SameLine();
-            const bool add_clicked = ImGui::Button("watch", ImVec2(-1.0f, 0.0f));
+            const bool add_clicked = ImGui::Button("Watch", ImVec2(-1.0f, 0.0f));
 
             if ((submitted || add_clicked) && !m_watch_input.empty())
             {
@@ -1904,7 +2005,7 @@ namespace Hsdbg
 
             if (m_watches.empty())
             {
-                ImGui::TextDisabled("watch an expression; it re-evaluates on every stop");
+                ImGui::TextDisabled("Watch an expression; it re-evaluates on every stop");
             }
             else
             {
@@ -1913,12 +2014,13 @@ namespace Hsdbg
 
                 if (ImGui::BeginTable("##watches", 3, flags))
                 {
-                    ImGui::TableSetupColumn("expression", ImGuiTableColumnFlags_WidthFixed, 140.0f);
-                    ImGui::TableSetupColumn("value");
+                    ImGui::TableSetupColumn("Expression", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+                    ImGui::TableSetupColumn("Value");
                     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.0f);
                     ImGui::TableSetupScrollFreeze(0, 1);
                     ImGui::TableHeadersRow();
 
+                    ImGui::PushFont(m_font_mono, 0.0f);
                     size_t remove_index = m_watches.size();
 
                     for (size_t index = 0; index < m_watches.size(); ++index)
@@ -1941,12 +2043,13 @@ namespace Hsdbg
                                                watch.value.c_str());
 
                         ImGui::TableNextColumn();
-                        if (ImGui::SmallButton("x"))
+                        if (Widgets::remove_button("##remove"))
                             remove_index = index;
 
                         ImGui::PopID();
                     }
 
+                    ImGui::PopFont();
                     ImGui::EndTable();
 
                     if (remove_index < m_watches.size())
@@ -1967,7 +2070,7 @@ namespace Hsdbg
         {
             if (debugger.registers().empty())
             {
-                ImGui::TextDisabled("no registers");
+                Widgets::empty_state(ICON_PH_CPU, "No registers");
             }
             else
             {
@@ -1976,11 +2079,12 @@ namespace Hsdbg
 
                 if (ImGui::BeginTable("##registers", 2, flags))
                 {
-                    ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-                    ImGui::TableSetupColumn("value");
+                    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+                    ImGui::TableSetupColumn("Value");
                     ImGui::TableSetupScrollFreeze(0, 1);
                     ImGui::TableHeadersRow();
 
+                    ImGui::PushFont(m_font_mono, 0.0f);
                     for (const Register& entry : debugger.registers())
                     {
                         ImGui::TableNextRow();
@@ -1989,6 +2093,7 @@ namespace Hsdbg
                         ImGui::TableNextColumn();
                         ImGui::Text("0x%016llx", static_cast<unsigned long long>(entry.value));
                     }
+                    ImGui::PopFont();
 
                     ImGui::EndTable();
                 }
@@ -2009,12 +2114,12 @@ namespace Hsdbg
 
             if (symbols.empty())
             {
-                ImGui::TextDisabled("no symbols");
+                Widgets::empty_state(ICON_PH_FUNCTION, "No symbols");
             }
             else
             {
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::InputTextWithHint("##symbol_filter", "filter symbols", &m_symbol_filter);
+                ImGui::InputTextWithHint("##symbol_filter", "Filter symbols", &m_symbol_filter);
 
                 std::vector<size_t> visible;
 
@@ -2032,11 +2137,12 @@ namespace Hsdbg
 
                 if (ImGui::BeginTable("##symbols", 2, flags))
                 {
-                    ImGui::TableSetupColumn("address", ImGuiTableColumnFlags_WidthFixed, 110.0f);
-                    ImGui::TableSetupColumn("name");
+                    ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+                    ImGui::TableSetupColumn("Name");
                     ImGui::TableSetupScrollFreeze(0, 1);
                     ImGui::TableHeadersRow();
 
+                    ImGui::PushFont(m_font_mono, 0.0f);
                     const float row_height = ImGui::GetTextLineHeightWithSpacing();
 
                     if (m_scroll_to_symbol)
@@ -2088,6 +2194,7 @@ namespace Hsdbg
                             ImGui::PopID();
                         }
                     }
+                    ImGui::PopFont();
 
                     ImGui::EndTable();
                 }
@@ -2108,14 +2215,16 @@ namespace Hsdbg
 
             if (instructions.empty())
             {
-                ImGui::TextDisabled("no disassembly");
+                Widgets::empty_state(ICON_PH_LIST, "No disassembly");
             }
             else
             {
                 if (!debugger.disassembly_name().empty())
                     ImGui::TextUnformatted(debugger.disassembly_name().data());
 
+                ImGui::PushFont(m_font_mono, 0.0f);
                 draw_instruction_table(debugger, instructions, m_scroll_to_program_counter);
+                ImGui::PopFont();
                 m_scroll_to_program_counter = false;
             }
         }
@@ -2134,6 +2243,7 @@ namespace Hsdbg
 
             if (ImGui::BeginChild("##console_output", ImVec2(0.0f, -input_height)))
             {
+                ImGui::PushFont(m_font_mono, 0.0f);
                 for (const std::string& line : debugger.console_output())
                     draw_ansi_line(line);
 
@@ -2145,6 +2255,7 @@ namespace Hsdbg
                     ImGui::SetScrollHereY(1.0f);
                     m_console_scroll_pending = false;
                 }
+                ImGui::PopFont();
             }
 
             ImGui::EndChild();
@@ -2152,7 +2263,7 @@ namespace Hsdbg
             ImGui::SetNextItemWidth(-1.0f);
 
             const bool submitted = ImGui::InputTextWithHint("##console_input",
-                                                            "expression to evaluate",
+                                                            "Expression to evaluate",
                                                             &m_console_input,
                                                             ImGuiInputTextFlags_EnterReturnsTrue);
 
@@ -2183,12 +2294,11 @@ namespace Hsdbg
             const bool instrumented = debugger.instrumentation_active();
             const std::span<const FunctionTrace> traces = debugger.traces();
 
-            // compact header: how calls are being gathered. instrumentation, when
-            // the target carries it, is exact and needs nothing; otherwise sampling
-            // approximates on any binary. either way calls flow into the flame chart
+            // header: how calls are gathered — instrumentation (exact, if the target
+            // carries it) or sampling (approximate, any binary)
             if (instrumented)
             {
-                ImGui::TextDisabled("instrumented target — every function timed automatically");
+                ImGui::TextDisabled("Instrumented target — every function timed automatically");
             }
             else
             {
@@ -2213,12 +2323,12 @@ namespace Hsdbg
             if (ImGui::CollapsingHeader("function timings", ImGuiTreeNodeFlags_DefaultOpen))
             {
                 ImGui::SetNextItemWidth(-70.0f);
-                const bool submitted = ImGui::InputTextWithHint("##trace_input", "function to time",
+                const bool submitted = ImGui::InputTextWithHint("##trace_input", "Function to time",
                                                                 &m_trace_input,
                                                                 ImGuiInputTextFlags_EnterReturnsTrue);
 
                 ImGui::SameLine();
-                const bool add_clicked = ImGui::Button("trace", ImVec2(-1.0f, 0.0f));
+                const bool add_clicked = ImGui::Button("Trace", ImVec2(-1.0f, 0.0f));
 
                 if ((submitted || add_clicked) && !m_trace_input.empty())
                 {
@@ -2228,17 +2338,17 @@ namespace Hsdbg
 
                 if (traces.empty())
                 {
-                    ImGui::TextDisabled("name a function above to count and time its calls");
+                    ImGui::TextDisabled("Name a function above to count and time its calls");
                 }
                 else if (ImGui::BeginTable("##traces", 6,
                                            ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
                                            ImGuiTableFlags_Resizable))
                 {
-                    ImGui::TableSetupColumn("function");
-                    ImGui::TableSetupColumn("calls", ImGuiTableColumnFlags_WidthFixed, 52.0f);
-                    ImGui::TableSetupColumn("avg", ImGuiTableColumnFlags_WidthFixed, 72.0f);
-                    ImGui::TableSetupColumn("min", ImGuiTableColumnFlags_WidthFixed, 72.0f);
-                    ImGui::TableSetupColumn("max", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+                    ImGui::TableSetupColumn("Function");
+                    ImGui::TableSetupColumn("Calls", ImGuiTableColumnFlags_WidthFixed, 52.0f);
+                    ImGui::TableSetupColumn("Avg", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+                    ImGui::TableSetupColumn("Min", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+                    ImGui::TableSetupColumn("Max", ImGuiTableColumnFlags_WidthFixed, 72.0f);
                     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.0f);
                     ImGui::TableHeadersRow();
 
@@ -2279,7 +2389,7 @@ namespace Hsdbg
 
                         ImGui::TableNextColumn();
                         ImGui::PushID(static_cast<int>(trace.id));
-                        if (ImGui::SmallButton("x"))
+                        if (Widgets::remove_button("##remove"))
                             remove_id = trace.id;
                         ImGui::PopID();
                     }
@@ -2299,7 +2409,7 @@ namespace Hsdbg
 
                 ImGui::Text("%.1f MB", memory.latest());
                 ImGui::SameLine();
-                ImGui::TextDisabled("peak %.1f MB", memory.maximum());
+                ImGui::TextDisabled("Peak %.1f MB", memory.maximum());
 
                 ImGui::PlotLines("##target_memory", memory.values(), memory.count(), memory.offset(),
                                  nullptr, 0.0f, FLT_MAX, ImVec2(-1.0f, 60.0f));
@@ -2314,24 +2424,23 @@ namespace Hsdbg
                     m_profiler.set_paused(paused);
 
                 ImGui::SameLine();
-                if (ImGui::SmallButton("reset"))
+                if (ImGui::SmallButton("Reset"))
                     m_profiler.reset();
 
                 const TimeSeries& frame_ms = m_profiler.frame_times();
                 const TimeSeries& fps = m_profiler.frame_rates();
 
-                const std::string frame_overlay =
-                    std::format("{:.2f} ms  (avg {:.2f}  peak {:.2f})",
-                                frame_ms.latest(), frame_ms.average(), frame_ms.maximum());
+                const std::string frame_overlay = std::format("{:.2f} ms  (avg {:.2f}  peak {:.2f})",
+                                                               frame_ms.latest(), frame_ms.average(),
+                                                               frame_ms.maximum());
 
-                ImGui::TextUnformatted("frame time");
+                ImGui::TextUnformatted("Frame time");
                 ImGui::PlotLines("##frame_ms", frame_ms.values(), frame_ms.count(), frame_ms.offset(),
                                  frame_overlay.c_str(), 0.0f, FLT_MAX, ImVec2(-1.0f, 70.0f));
 
-                const std::string fps_overlay =
-                    std::format("{:.0f} fps  (avg {:.0f})", fps.latest(), fps.average());
+                const std::string fps_overlay = std::format("{:.0f} fps  (avg {:.0f})", fps.latest(), fps.average());
 
-                ImGui::TextUnformatted("frame rate");
+                ImGui::TextUnformatted("Frame rate");
                 ImGui::PlotLines("##fps", fps.values(), fps.count(), fps.offset(),
                                  fps_overlay.c_str(), 0.0f, FLT_MAX, ImVec2(-1.0f, 70.0f));
             }
@@ -2347,11 +2456,11 @@ namespace Hsdbg
         if (spans.empty())
         {
             if (debugger.instrumentation_active())
-                ImGui::TextDisabled("instrumented target — run it to lay out its calls here");
+                ImGui::TextDisabled("Instrumented target — run it to lay out its calls here");
             else if (debugger.sampling_enabled())
-                ImGui::TextDisabled("sampling — run the target and the calls will appear here");
+                ImGui::TextDisabled("Sampling — run the target and the calls will appear here");
             else
-                ImGui::TextDisabled("turn on sampling, or trace a function below, then run");
+                ImGui::TextDisabled("Turn on sampling, or trace a function below, then run");
 
             return;
         }
@@ -2426,11 +2535,11 @@ namespace Hsdbg
             {
                 ImGui::BeginTooltip();
                 ImGui::TextUnformatted(name_of(span.trace_id));
-                ImGui::Text("start %.3f ms", (span.start - t_min) * 1000.0);
+                ImGui::Text("Start %.3f ms", (span.start - t_min) * 1000.0);
                 if (span.duration > 0.0)
-                    ImGui::Text("duration %.3f ms", span.duration * 1000.0);
+                    ImGui::Text("Duration %.3f ms", span.duration * 1000.0);
                 else
-                    ImGui::TextDisabled("running...");
+                    ImGui::TextDisabled("Running…");
                 ImGui::EndTooltip();
             }
         }
@@ -2447,17 +2556,17 @@ namespace Hsdbg
         {
             const MacroTable& table = m_source_view.macros();
 
-            ImGui::TextDisabled("unroll a #define one layer per level");
+            ImGui::TextDisabled("Unroll a #define one layer per level");
 
             ImGui::SetNextItemWidth(-FLT_MIN);
 
             if (ImGui::InputTextWithHint("##macro_input",
-                                         "click a macro in source, or type one like MAX(a, b)",
+                                         "Click a macro in Source, or type one like MAX(a, b)",
                                          &m_macro_input))
                 m_macro_level = 0;
 
             if (table.empty())
-                ImGui::TextDisabled("no #define macros found in the open source file");
+                ImGui::TextDisabled("No #define macros found in the open source file");
 
             if (m_macro_input.empty())
             {
@@ -2494,35 +2603,34 @@ namespace Hsdbg
             }
             else
             {
-                ImGui::TextDisabled("nothing to expand here");
+                ImGui::TextDisabled("Nothing to expand here");
                 ImGui::SameLine();
             }
 
             ImGui::SameLine();
 
-            if (ImGui::SmallButton("full"))
+            if (ImGui::SmallButton("Full"))
                 m_macro_level = max_level;
 
             ImGui::SameLine();
 
-            if (ImGui::SmallButton("reset"))
+            if (ImGui::SmallButton("Reset"))
                 m_macro_level = 0;
 
             // status: where we are, and whether the tail is truly the fixpoint
             if (max_level == 0)
-                ImGui::TextDisabled("already fully expanded");
+                ImGui::TextDisabled("Already fully expanded");
             else if (m_macro_level == max_level && expansion.fully_expanded())
-                ImGui::TextDisabled("level %d of %d — fully expanded", m_macro_level, max_level);
+                ImGui::TextDisabled("Level %d of %d — fully expanded", m_macro_level, max_level);
             else if (m_macro_level == max_level)
-                ImGui::TextDisabled("level %d — stopped at the expansion cap", m_macro_level);
+                ImGui::TextDisabled("Level %d — stopped at the expansion cap", m_macro_level);
             else
-                ImGui::TextDisabled("level %d of %d", m_macro_level, max_level);
+                ImGui::TextDisabled("Level %d of %d", m_macro_level, max_level);
 
             // which macros the next layer will unroll, so the step reads ahead
             if (m_macro_level < max_level)
             {
-                const std::vector<std::string>& next =
-                    expansion.expanded[static_cast<size_t>(m_macro_level) + 1];
+                const std::vector<std::string>& next = expansion.expanded[static_cast<size_t>(m_macro_level) + 1];
 
                 if (!next.empty())
                 {
@@ -2557,8 +2665,7 @@ namespace Hsdbg
     {
         // cmd/ctrl+k anywhere, or the menu item, opens it; opening resets the query
         // so it always starts clean and asks for the text field's focus next frame
-        const bool open_requested =
-            ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_K) || m_palette_request;
+        const bool open_requested = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_K) || m_palette_request;
 
         m_palette_request = false;
 
@@ -2626,9 +2733,9 @@ namespace Hsdbg
         add_command(stopped, Continue, "continue");
         add_command(running, Pause, "pause");
         add_command(has_target, Stop, "stop");
-        add_command(stopped, StepOver, "step over");
-        add_command(stopped, StepInto, "step into");
-        add_command(stopped, StepOut, "step out");
+        add_command(stopped, StepOver, "Step Over");
+        add_command(stopped, StepInto, "Step Into");
+        add_command(stopped, StepOut, "Step Out");
         add_command(true, ToggleProfiler, m_visible.profiler ? "hide profiler" : "show profiler");
 
         // files and symbols only clutter the list once there is a query to match
@@ -2700,9 +2807,9 @@ namespace Hsdbg
                         case Continue:  report(debugger.resume(), "continue");   break;
                         case Pause:     report(debugger.pause(), "pause");       break;
                         case Stop:      report(debugger.terminate(), "stop");    break;
-                        case StepOver:  report(debugger.step_over(), "step over"); break;
-                        case StepInto:  report(debugger.step_into(), "step into"); break;
-                        case StepOut:   report(debugger.step_out(), "step out");  break;
+                        case StepOver:  report(debugger.step_over(), "Step Over"); break;
+                        case StepInto:  report(debugger.step_into(), "Step Into"); break;
+                        case StepOut:   report(debugger.step_out(), "Step Out");  break;
                         case ToggleProfiler:
                             m_visible.profiler = !m_visible.profiler;
                             if (m_visible.profiler)
@@ -2724,7 +2831,7 @@ namespace Hsdbg
 
         ImGui::SetNextItemWidth(-FLT_MIN);
         const bool submitted = ImGui::InputTextWithHint("##palette_query",
-                                                        "jump to a file or symbol, or run a command",
+                                                        "Jump to a file or symbol, or run a command",
                                                         &m_palette_query,
                                                         ImGuiInputTextFlags_EnterReturnsTrue);
 
@@ -2739,7 +2846,7 @@ namespace Hsdbg
 
         if (entries.empty())
         {
-            ImGui::TextDisabled("no matches");
+            ImGui::TextDisabled("No matches");
         }
         else
         {
@@ -2796,6 +2903,127 @@ namespace Hsdbg
         push_console(std::format("{} failed: {}", action, result.error()));
     }
 
+    auto Ui::load_fonts() -> void
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        const std::filesystem::path dir = std::filesystem::path(HSDBG_ASSET_DIR) / "fonts";
+
+        // the icon glyphs sit in the private-use area and are merged over each ui
+        // face, so ICON_PH_* strings render inline with ordinary text
+        static const ImWchar icon_range[] = { ICON_MIN_PH, ICON_MAX_PH, 0 };
+
+        const auto load = [&](const char* file, float size, bool merge_icons) -> ImFont* {
+            const std::string path = (dir / file).string();
+
+            // a hair of extra coverage so the text holds up on the dark ground
+            ImFontConfig base;
+            base.RasterizerMultiply = 1.03f;
+
+            ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), size, &base);
+            if (font == nullptr)
+            {
+                Log::warn("fonts: could not load '{}'", path);
+                return nullptr;
+            }
+            if (merge_icons)
+            {
+                ImFontConfig cfg;
+                cfg.MergeMode = true;
+                cfg.PixelSnapH = true;
+                cfg.GlyphMinAdvanceX = size;          // one cell per icon, so they align
+                cfg.GlyphOffset = ImVec2(0.0f, 1.0f); // drop onto the text baseline
+                io.Fonts->AddFontFromFileTTF((dir / "Phosphor.ttf").string().c_str(),
+                                             size, &cfg, icon_range);
+            }
+            return font;
+        };
+
+        constexpr float UI_SIZE = 16.0f;
+
+        // the first face added is the default and fixes the base size the rest of
+        // the ui scales from
+        m_font_ui = load("Nunito-Medium.ttf", UI_SIZE, true);
+        m_font_strong = load("Nunito-Bold.ttf", UI_SIZE, true);
+        m_font_mono = load("JetBrainsMono-Regular.ttf", UI_SIZE, false);
+
+        // never come up unstyled: fall back to the built-in vector face
+        if (m_font_ui == nullptr)
+        {
+            Log::warn("fonts: bundled faces missing, using the built-in font");
+            m_font_ui = io.Fonts->AddFontDefaultVector();
+        }
+        if (m_font_strong == nullptr)
+            m_font_strong = m_font_ui;
+        if (m_font_mono == nullptr)
+            m_font_mono = m_font_ui;
+
+        io.FontDefault = m_font_ui;
+        Widgets::set_fonts(m_font_ui, m_font_strong, m_font_mono);
+    }
+
+    auto Ui::themes_directory() -> std::filesystem::path
+    {
+        return std::filesystem::path(HSDBG_ASSET_DIR) / "themes";
+    }
+
+    auto Ui::seed_preferences_from_theme() -> void
+    {
+        const auto copy = [](const ImVec4& from, float (&to)[3]) {
+            to[0] = from.x;
+            to[1] = from.y;
+            to[2] = from.z;
+        };
+
+        copy(m_theme.accent, m_preferences.accent);
+        m_preferences.rounding = m_theme.rounding;
+        copy(m_theme.syntax_keyword, m_preferences.color_keyword);
+        copy(m_theme.syntax_type, m_preferences.color_type);
+        copy(m_theme.syntax_string, m_preferences.color_string);
+        copy(m_theme.syntax_number, m_preferences.color_number);
+        copy(m_theme.syntax_comment, m_preferences.color_comment);
+        copy(m_theme.syntax_preprocessor, m_preferences.color_preprocessor);
+        copy(m_theme.current_line, m_preferences.color_current_line);
+    }
+
+    auto Ui::load_selected_theme(bool seed_preferences) -> void
+    {
+        m_themes = list_themes(themes_directory());
+
+        // resolve the saved id to a file; fall back to the first theme found,
+        // then to the baked-in default, so the ui is never left unstyled
+        std::filesystem::path path;
+        for (const auto& entry : m_themes)
+        {
+            if (entry.id == m_preferences.theme)
+            {
+                path = entry.path;
+                break;
+            }
+        }
+        if (path.empty() && !m_themes.empty())
+        {
+            path = m_themes.front().path;
+            m_preferences.theme = m_themes.front().id;
+        }
+
+        m_theme = path.empty() ? default_theme() : load_theme(path);
+
+        if (seed_preferences)
+            seed_preferences_from_theme();
+    }
+
+    auto Ui::select_theme(const ThemeEntry& entry) -> void
+    {
+        m_preferences.theme = entry.id;
+        m_theme = load_theme(entry.path);
+
+        // picking a theme resets the tweakable accent / rounding / syntax to its
+        // values; the source view picks up the new syntax next frame
+        seed_preferences_from_theme();
+        m_restyle_pending = true;
+        save_preferences(m_preferences_path, m_preferences);
+    }
+
     auto Ui::apply_style() -> void
     {
         ImGuiStyle& style = ImGui::GetStyle();
@@ -2810,21 +3038,34 @@ namespace Hsdbg
         style.GrabRounding = radius;
         style.TabRounding = radius;
 
-        style.WindowBorderSize = 1.0f;
+        style.WindowBorderSize = m_theme.window_border;
         style.FrameBorderSize = 0.0f;
-        style.WindowPadding = ImVec2(8.0f, 8.0f);
-        style.FramePadding = ImVec2(8.0f, 4.0f);
-        style.ItemSpacing = ImVec2(8.0f, 5.0f);
+        style.WindowPadding = ImVec2(9.0f, 7.0f);
+        style.FramePadding = ImVec2(9.0f, 5.0f);
+        style.ItemSpacing = ImVec2(7.0f, 5.0f);
+        style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+        style.IndentSpacing = 16.0f;
+        style.CellPadding = ImVec2(7.0f, 4.0f);
         style.ScrollbarSize = 11.0f;
-        style.GrabMinSize = 9.0f;
+        style.GrabMinSize = 10.0f;
+        style.TabBarBorderSize = 0.0f;
+        style.DockingSeparatorSize = 7.0f;   // widen the splitter into a visible gap
         style.WindowTitleAlign = ImVec2(0.0f, 0.5f);
         style.SeparatorTextBorderSize = 1.0f;
 
-        // the accent is user-chosen; the hover/active shades are blended from it
-        // toward the button base so any colour stays coherent across the theme
+        // neutral levels come from the theme; interactive states are derived, so a
+        // theme names only a handful of colours. "emphasis" nudges a level toward
+        // the text colour, so one rule brightens dark themes and darkens light ones
+        const ImVec4 text = m_theme.text;
+        const ImVec4 bg = m_theme.bg;
+        const ImVec4 bg_low = m_theme.bg_low;
+        const ImVec4 bg_high = m_theme.bg_high;
+        const ImVec4 surface = m_theme.surface;
+
+        // the accent is user-chosen (seeded from the theme); its hover/active
+        // shades blend from the button base toward it so it stays coherent
         const ImVec4 accent(m_preferences.accent[0], m_preferences.accent[1],
                             m_preferences.accent[2], 1.0f);
-        const ImVec4 base(0.18f, 0.18f, 0.22f, 1.0f);
 
         const auto mix = [](ImVec4 from, ImVec4 to, float t) {
             return ImVec4(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t,
@@ -2833,59 +3074,63 @@ namespace Hsdbg
         const auto fade = [](ImVec4 colour, float alpha) {
             return ImVec4(colour.x, colour.y, colour.z, alpha);
         };
+        const auto emphasis = [&](ImVec4 colour, float t) { return mix(colour, text, t); };
 
         const ImVec4 accent_bright = mix(accent, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), 0.14f);
-        const ImVec4 accent_hover = mix(base, accent, 0.42f);
-        const ImVec4 accent_active = mix(base, accent, 0.68f);
+        const ImVec4 accent_hover = mix(surface, accent, 0.42f);
+        const ImVec4 accent_active = mix(surface, accent, 0.68f);
+        const ImVec4 grab = emphasis(bg, 0.18f);
 
         ImVec4* colors = style.Colors;
 
-        colors[ImGuiCol_Text] = ImVec4(0.86f, 0.86f, 0.88f, 1.00f);
-        colors[ImGuiCol_TextDisabled] = ImVec4(0.44f, 0.44f, 0.48f, 1.00f);
-        colors[ImGuiCol_WindowBg] = ImVec4(0.09f, 0.09f, 0.11f, 1.00f);
-        colors[ImGuiCol_ChildBg] = ImVec4(0.10f, 0.10f, 0.12f, 1.00f);
-        colors[ImGuiCol_PopupBg] = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
-        colors[ImGuiCol_Border] = ImVec4(0.20f, 0.20f, 0.24f, 1.00f);
+        colors[ImGuiCol_Text] = text;
+        colors[ImGuiCol_TextDisabled] = m_theme.text_dim;
+        colors[ImGuiCol_WindowBg] = bg;
+        colors[ImGuiCol_ChildBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+        colors[ImGuiCol_PopupBg] = bg_high;
+        colors[ImGuiCol_Border] = m_theme.border;
         colors[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-        colors[ImGuiCol_FrameBg] = ImVec4(0.16f, 0.16f, 0.19f, 1.00f);
-        colors[ImGuiCol_FrameBgHovered] = ImVec4(0.21f, 0.21f, 0.26f, 1.00f);
-        colors[ImGuiCol_FrameBgActive] = ImVec4(0.25f, 0.25f, 0.31f, 1.00f);
-        colors[ImGuiCol_TitleBg] = ImVec4(0.07f, 0.07f, 0.09f, 1.00f);
-        colors[ImGuiCol_TitleBgActive] = ImVec4(0.11f, 0.11f, 0.14f, 1.00f);
-        colors[ImGuiCol_TitleBgCollapsed] = ImVec4(0.07f, 0.07f, 0.09f, 1.00f);
-        colors[ImGuiCol_MenuBarBg] = ImVec4(0.11f, 0.11f, 0.14f, 1.00f);
-        colors[ImGuiCol_ScrollbarBg] = ImVec4(0.09f, 0.09f, 0.11f, 1.00f);
-        colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.24f, 0.24f, 0.29f, 1.00f);
-        colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.30f, 0.30f, 0.36f, 1.00f);
-        colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.36f, 0.36f, 0.43f, 1.00f);
+        colors[ImGuiCol_FrameBg] = bg_high;
+        colors[ImGuiCol_FrameBgHovered] = emphasis(bg_high, 0.06f);
+        colors[ImGuiCol_FrameBgActive] = emphasis(bg_high, 0.10f);
+        colors[ImGuiCol_TitleBg] = bg_low;
+        colors[ImGuiCol_TitleBgActive] = emphasis(bg_low, 0.05f);
+        colors[ImGuiCol_TitleBgCollapsed] = bg_low;
+        colors[ImGuiCol_MenuBarBg] = emphasis(bg_low, 0.04f);
+        colors[ImGuiCol_ScrollbarBg] = bg;
+        colors[ImGuiCol_ScrollbarGrab] = grab;
+        colors[ImGuiCol_ScrollbarGrabHovered] = emphasis(bg, 0.28f);
+        colors[ImGuiCol_ScrollbarGrabActive] = emphasis(bg, 0.38f);
         colors[ImGuiCol_CheckMark] = accent;
         colors[ImGuiCol_SliderGrab] = accent;
         colors[ImGuiCol_SliderGrabActive] = accent_bright;
-        colors[ImGuiCol_Button] = base;
+        colors[ImGuiCol_Button] = surface;
         colors[ImGuiCol_ButtonHovered] = accent_hover;
         colors[ImGuiCol_ButtonActive] = accent_active;
-        colors[ImGuiCol_Header] = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
+        colors[ImGuiCol_Header] = surface;
         colors[ImGuiCol_HeaderHovered] = accent_hover;
         colors[ImGuiCol_HeaderActive] = accent_active;
-        colors[ImGuiCol_Separator] = ImVec4(0.20f, 0.20f, 0.24f, 1.00f);
+        colors[ImGuiCol_Separator] = m_theme.border;
         colors[ImGuiCol_SeparatorHovered] = fade(accent, 0.60f);
         colors[ImGuiCol_SeparatorActive] = accent;
-        colors[ImGuiCol_ResizeGrip] = ImVec4(0.24f, 0.24f, 0.29f, 1.00f);
+        colors[ImGuiCol_ResizeGrip] = grab;
         colors[ImGuiCol_ResizeGripHovered] = fade(accent, 0.60f);
         colors[ImGuiCol_ResizeGripActive] = accent;
-        colors[ImGuiCol_Tab] = ImVec4(0.11f, 0.11f, 0.14f, 1.00f);
-        colors[ImGuiCol_TabHovered] = accent_hover;
-        colors[ImGuiCol_TabSelected] = mix(base, accent, 0.30f);
+        // the selected tab takes the panel-body colour so it reads as connected to
+        // its content, not a floating chip; the accent overline marks it
+        colors[ImGuiCol_Tab] = bg_low;
+        colors[ImGuiCol_TabHovered] = emphasis(bg_low, 0.10f);
+        colors[ImGuiCol_TabSelected] = bg;
         colors[ImGuiCol_TabSelectedOverline] = accent;
-        colors[ImGuiCol_TabDimmed] = ImVec4(0.09f, 0.09f, 0.11f, 1.00f);
-        colors[ImGuiCol_TabDimmedSelected] = mix(ImVec4(0.14f, 0.14f, 0.17f, 1.0f), accent, 0.16f);
+        colors[ImGuiCol_TabDimmed] = bg_low;
+        colors[ImGuiCol_TabDimmedSelected] = bg;
         colors[ImGuiCol_DockingPreview] = fade(accent, 0.50f);
-        colors[ImGuiCol_DockingEmptyBg] = ImVec4(0.07f, 0.07f, 0.09f, 1.00f);
-        colors[ImGuiCol_TableHeaderBg] = ImVec4(0.14f, 0.14f, 0.17f, 1.00f);
-        colors[ImGuiCol_TableBorderStrong] = ImVec4(0.20f, 0.20f, 0.24f, 1.00f);
-        colors[ImGuiCol_TableBorderLight] = ImVec4(0.16f, 0.16f, 0.19f, 1.00f);
+        colors[ImGuiCol_DockingEmptyBg] = bg_low;
+        colors[ImGuiCol_TableHeaderBg] = bg_high;
+        colors[ImGuiCol_TableBorderStrong] = m_theme.border;
+        colors[ImGuiCol_TableBorderLight] = mix(bg, m_theme.border, 0.5f);
         colors[ImGuiCol_TableRowBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-        colors[ImGuiCol_TableRowBgAlt] = ImVec4(1.00f, 1.00f, 1.00f, 0.02f);
+        colors[ImGuiCol_TableRowBgAlt] = fade(text, 0.03f);
         colors[ImGuiCol_TextSelectedBg] = fade(accent, 0.35f);
         colors[ImGuiCol_NavCursor] = accent;
     }

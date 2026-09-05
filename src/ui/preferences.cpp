@@ -54,7 +54,9 @@ namespace Hsdbg
             const std::string_view key(line.data(), equals);
             const std::string_view value(line.data() + equals + 1, line.size() - equals - 1);
 
-            if (key == "ui_scale")
+            if (key == "theme")
+                preferences.theme = std::string(value);
+            else if (key == "ui_scale")
                 preferences.ui_scale = as_float(value, preferences.ui_scale);
             else if (key == "accent")
                 std::sscanf(std::string(value).c_str(), "%f %f %f",
@@ -109,7 +111,8 @@ namespace Hsdbg
             return std::to_string(c[0]) + ' ' + std::to_string(c[1]) + ' ' + std::to_string(c[2]);
         };
 
-        file << "ui_scale=" << preferences.ui_scale << '\n'
+        file << "theme=" << preferences.theme << '\n'
+             << "ui_scale=" << preferences.ui_scale << '\n'
              << "accent=" << color(preferences.accent) << '\n'
              << "rounding=" << preferences.rounding << '\n'
              << "show_mascot=" << (preferences.show_mascot ? "true" : "false") << '\n'

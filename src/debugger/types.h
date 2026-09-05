@@ -39,13 +39,13 @@ namespace Hsdbg
     {
         switch (state)
         {
-            case TargetState::NoTarget:  return "no target";
-            case TargetState::Loaded:    return "loaded";
-            case TargetState::Launching: return "launching";
-            case TargetState::Running:   return "running";
-            case TargetState::Stopped:   return "stopped";
-            case TargetState::Exited:    return "exited";
-            case TargetState::Crashed:   return "crashed";
+            case TargetState::NoTarget:  return "No target";
+            case TargetState::Loaded:    return "Loaded";
+            case TargetState::Launching: return "Launching";
+            case TargetState::Running:   return "Running";
+            case TargetState::Stopped:   return "Stopped";
+            case TargetState::Exited:    return "Exited";
+            case TargetState::Crashed:   return "Crashed";
         }
 
         return "unknown";

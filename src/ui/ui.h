@@ -6,6 +6,7 @@
 #include "ui/preferences.h"
 #include "ui/profiler.h"
 #include "ui/source_view.h"
+#include "ui/theme.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -58,10 +59,24 @@ namespace Hsdbg
             // view when you unroll a macro from source
             bool profiler = false;
             bool macros = false;
-            bool demo = false;
         };
 
         auto apply_style() -> void;
+
+        // loads the bundled Inter / JetBrains Mono / Phosphor faces from
+        // assets/fonts and merges the icons over the ui fonts; falls back to the
+        // built-in vector font if the files are missing
+        auto load_fonts() -> void;
+
+        // theme handling: the neutral palette lives in m_theme (reloaded from
+        // disk at startup and whenever a theme is picked); the accent, rounding
+        // and syntax colours are seeded from it into the live preferences so they
+        // stay individually tweakable afterwards
+        auto load_selected_theme(bool seed_preferences) -> void;
+        auto seed_preferences_from_theme() -> void;
+        auto select_theme(const ThemeEntry& entry) -> void;
+        static auto themes_directory() -> std::filesystem::path;
+
         static auto build_default_layout(uint32_t dockspace_id) -> void;
 
         // a fuzzy omnibar (cmd/ctrl+k) over files, symbols and execution commands,
@@ -119,6 +134,20 @@ namespace Hsdbg
         bool m_show_preferences = false;
         bool m_restyle_pending = false;
         int m_preferences_tab = 0;
+
+        // the loaded theme's neutral palette and style metrics, and the cached
+        // list of theme files shown in the picker (rescanned when the window
+        // opens so newly dropped-in files appear)
+        Theme m_theme;
+        std::vector<ThemeEntry> m_themes;
+        bool m_prefs_open_prev = false;
+
+        // the bundled faces, all with Phosphor icons merged in: ui is Nunito (its
+        // rounded letterforms echo the rounded ui), the strong variant is its
+        // SemiBold for headers and toolbar labels, mono is JetBrains Mono for code
+        ImFont* m_font_ui = nullptr;
+        ImFont* m_font_strong = nullptr;
+        ImFont* m_font_mono = nullptr;
 
         // the crying-pepe that lives in the toolbar; loaded on the first frame
         // once there is a gl context to upload its textures to, and drawn with a

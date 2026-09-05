@@ -1,0 +1,25 @@
+[theme]
+name = "Midnight"
+
+[palette]
+text     = "#ECEEF3"
+text_dim = "#838B9E"
+bg       = "#15161C"
+bg_low   = "#101116"
+bg_high  = "#1E2028"
+surface  = "#262933"
+border   = "#363A47"
+accent   = "#4DB6C4"
+
+[style]
+rounding      = 6
+window_border = 1
+
+[syntax]
+keyword      = "#569CD6"
+type         = "#4EC9B0"
+string       = "#CE9178"
+number       = "#B5CEA8"
+comment      = "#6A9955"
+preprocessor = "#C586C0"
+current_line = "#3A482E"

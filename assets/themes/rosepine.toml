@@ -1,0 +1,25 @@
+[theme]
+name = "Rosé Pine"
+
+[palette]
+text     = "#E0DEF4"
+text_dim = "#908CAA"
+bg       = "#191724"
+bg_low   = "#14121C"
+bg_high  = "#1F1D2E"
+surface  = "#26233A"
+border   = "#403D52"
+accent   = "#C4A7E7"
+
+[style]
+rounding      = 7
+window_border = 1
+
+[syntax]
+keyword      = "#31748F"
+type         = "#9CCFD8"
+string       = "#F6C177"
+number       = "#EBBCBA"
+comment      = "#6E6A86"
+preprocessor = "#EB6F92"
+current_line = "#26233A"

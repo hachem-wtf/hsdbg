@@ -1,0 +1,29 @@
+# Bark - https://github.com/if-not-nil/bark
+#    * by :lung/if-not-nil
+#    * creator of revo: https://revo.lung.fyi
+
+[theme]
+name = "Bark"
+
+[palette]
+text     = "#D0D0D0"
+text_dim = "#808080"
+bg       = "#101010"
+bg_low   = "#0A0A0A"
+bg_high  = "#202020"
+surface  = "#2B2B2B"
+border   = "#383838"
+accent   = "#7CAFC2"
+
+[style]
+rounding      = 6
+window_border = 1
+
+[syntax]
+keyword      = "#BA8BAF"
+type         = "#F7CA88"
+string       = "#A1B56C"
+number       = "#DC9656"
+comment      = "#585858"
+preprocessor = "#7CAFC2"
+current_line = "#202020"

@@ -23,10 +23,8 @@ namespace Hsdbg
             return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
         }
 
-        // pull one preprocessing token out of text starting at index. strings and
-        // character literals are kept whole, and multi-character punctuators the
-        // expander actually reasons about (##, ::, ->) are recognised so they do
-        // not split. everything else falls back to a single-character punctuator
+        // one preprocessing token from text at index: strings / char literals kept
+        // whole, multi-char punctuators (##, ::, ->) recognised, else a single char
         auto lex_one(std::string_view text, size_t& at) -> PpToken
         {
             while (at < text.size() && std::isspace(static_cast<unsigned char>(text[at])) != 0)
@@ -239,9 +237,8 @@ namespace Hsdbg
         auto expand_full(const MacroTable& table, std::vector<PpToken> tokens)
             -> std::vector<PpToken>;
 
-        // raw holds each argument exactly as written (what # and ## must see);
-        // expanded holds the same arguments after full macro expansion (what a
-        // plain parameter reference is replaced with, per the standard)
+        // raw = each argument as written (for # and ##); expanded = the same arguments
+        // after full macro expansion (for a plain parameter reference)
         auto substitute(const MacroDef& def, const ArgList& raw, const ArgList& expanded)
             -> std::vector<PpToken>
         {
@@ -342,22 +339,19 @@ namespace Hsdbg
 
                 // a parameter next to ## on either side keeps its raw argument;
                 // everywhere else it takes the fully expanded one
-                const bool paste_operand =
-                    (i + 1 < body.size() && body[i + 1].text == "##") ||
-                    (i > 0 && body[i - 1].text == "##");
+                const bool paste_operand = (i + 1 < body.size() && body[i + 1].text == "##") ||
+                                           (i > 0 && body[i - 1].text == "##");
 
                 if (const int index = param_index(def, tok.text); index >= 0)
                 {
-                    const std::vector<PpToken> value =
-                        paste_operand ? raw_tokens(index) : expanded_tokens(index);
+                    const std::vector<PpToken> value = paste_operand ? raw_tokens(index) : expanded_tokens(index);
                     out.insert(out.end(), value.begin(), value.end());
                     continue;
                 }
 
                 if (def.variadic && tok.text == "__VA_ARGS__")
                 {
-                    const std::vector<PpToken> value =
-                        paste_operand ? raw_varargs() : expanded_varargs();
+                    const std::vector<PpToken> value = paste_operand ? raw_varargs() : expanded_varargs();
                     out.insert(out.end(), value.begin(), value.end());
                     continue;
                 }
@@ -386,9 +380,8 @@ namespace Hsdbg
             }
         }
 
-        // gather the arguments of a function-like call. open is the index of '(';
-        // on success end is set past the matching ')'. returns false if the parens
-        // never balance, in which case the name is left as a plain identifier
+        // gather a function-like call's arguments; `open` is the '(' index, `end` is
+        // set past the ')'. false if the parens never balance
         auto collect_args(const std::vector<PpToken>& tokens, size_t open, ArgList& args,
                           size_t& end) -> bool
         {
@@ -435,13 +428,11 @@ namespace Hsdbg
             return false;
         }
 
-        // whether a call supplies enough arguments for a definition. a zero-arg
-        // macro invoked as NAME() lexes as a single empty argument, so treat that
-        // as a match
+        // enough arguments for the definition? a zero-arg macro called as NAME() lexes
+        // as one empty argument, so treat that as a match
         auto arity_ok(const MacroDef& def, const ArgList& args) -> bool
         {
-            const size_t provided =
-                args.size() == 1 && args.front().empty() ? 0 : args.size();
+            const size_t provided = args.size() == 1 && args.front().empty() ? 0 : args.size();
 
             if (def.variadic)
                 return provided >= def.params.size();
@@ -449,9 +440,8 @@ namespace Hsdbg
             return provided == def.params.size();
         }
 
-        // one expansion layer: every eligible macro name in the stream is replaced
-        // once, and the tokens it produced are left for the next layer to rescan.
-        // that "one layer per pass" rule is what the level slider steps through
+        // one expansion layer: every eligible macro name is replaced once and its
+        // output left for the next layer to rescan — what the level slider steps
         auto expand_pass(const MacroTable& table, const std::vector<PpToken>& in,
                          std::vector<PpToken>& out, std::vector<std::string>& expanded) -> bool
         {

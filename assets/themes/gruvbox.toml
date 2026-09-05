@@ -1,0 +1,25 @@
+[theme]
+name = "Gruvbox"
+
+[palette]
+text     = "#EBDBB2"
+text_dim = "#A89984"
+bg       = "#282828"
+bg_low   = "#1D2021"
+bg_high  = "#3C3836"
+surface  = "#504945"
+border   = "#665C54"
+accent   = "#FE8019"
+
+[style]
+rounding      = 5
+window_border = 1
+
+[syntax]
+keyword      = "#FB4934"
+type         = "#FABD2F"
+string       = "#B8BB26"
+number       = "#D3869B"
+comment      = "#928374"
+preprocessor = "#8EC07C"
+current_line = "#3C3836"

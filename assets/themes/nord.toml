@@ -1,0 +1,25 @@
+[theme]
+name = "Nord"
+
+[palette]
+text     = "#D8DEE9"
+text_dim = "#6C7A8D"
+bg       = "#2E3440"
+bg_low   = "#272C36"
+bg_high  = "#3B4252"
+surface  = "#434C5E"
+border   = "#4C566A"
+accent   = "#88C0D0"
+
+[style]
+rounding      = 6
+window_border = 1
+
+[syntax]
+keyword      = "#81A1C1"
+type         = "#8FBCBB"
+string       = "#A3BE8C"
+number       = "#B48EAD"
+comment      = "#616E88"
+preprocessor = "#5E81AC"
+current_line = "#3B4252"
