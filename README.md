@@ -16,7 +16,7 @@ The console lets you type C or C++ directly into the debugger, which LLDB JIT-co
 hsdbg builds on macOS, Linux, and Windows. You'll need [premake5](https://premake.github.io/) and a C++23 compiler. hsdbg links against LLVM/LLDB. By default, it pulls the pinned LLVM release (22.1.0) for your platform. Alternatively, you can point it at an existing LLVM installation that ships the LLDB headers with `LLVM_PREFIX`, or have `llvm-config` available on your `PATH`.
 
 ```bash
-$ git clone --recursive https://github.com/hachem-wtf/hsdbg.git
+$ git clone --recursive https://git.hachem.wtf/hachem/hsdbg.git
 $ cd hsdbg
 
 $ premake5 fetch-llvm
